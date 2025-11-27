@@ -9,6 +9,7 @@ Complete guide to deploy the Trading Bot on Ubuntu droplet.
 - [Detailed Setup](#detailed-setup)
 - [Configuration](#configuration)
 - [Running the Bot](#running-the-bot)
+- [Automatic Scheduling](#automatic-scheduling)
 - [Monitoring](#monitoring)
 - [Troubleshooting](#troubleshooting)
 - [Maintenance](#maintenance)
@@ -207,6 +208,51 @@ source .venv/bin/activate
 # Run directly
 python main.py
 ```
+
+---
+
+## Automatic Scheduling
+
+Set up the bot to automatically start/stop during trading hours.
+
+### Quick Setup
+
+```bash
+# Make script executable
+chmod +x setup_schedule.sh
+
+# Run setup
+./setup_schedule.sh
+```
+
+### What It Does
+
+- **8:50 AM**: Pre-downloads Dhan CSV (before market)
+- **9:00 AM**: Starts bot automatically (Mon-Fri)
+- **3:35 PM**: Stops bot automatically (Mon-Fri)
+- **Auto-restart**: If bot crashes, systemd restarts it in 10 seconds
+- **Health checks**: Every hour during trading hours
+- **Log cleanup**: Weekly cleanup of old logs
+
+### Features
+
+1. **Trading Hours Only** - Runs Mon-Fri only, stops on weekends
+2. **Crash Recovery** - Auto-restarts if bot crashes
+3. **Pre-warmed CSV** - Downloads CSV before market to avoid delays
+4. **Health Monitoring** - Hourly health checks
+5. **Manual Override** - Can still control manually anytime
+
+### View Schedule
+
+```bash
+# List scheduled tasks
+crontab -l
+
+# View execution logs
+tail -f logs/cron.log
+```
+
+For detailed scheduling documentation, see [SCHEDULING.md](SCHEDULING.md)
 
 ---
 
