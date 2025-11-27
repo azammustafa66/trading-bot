@@ -71,7 +71,14 @@ TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
 SESSION_NAME = os.getenv("SESSION_NAME", "telegram_session")
 TARGET_CHANNEL = os.getenv("TARGET_CHANNEL")
 
+# Signal storage paths
+SIGNALS_JSONL = os.getenv("SIGNALS_JSONL", "data/signals.jsonl")
+SIGNALS_JSON = os.getenv("SIGNALS_JSON", "data/signals.json")
+
 BATCH_DELAY_SECONDS = 2.0
+
+# Create data directory if it doesn't exist
+os.makedirs("data", exist_ok=True)
 
 
 class SignalBatcher:
@@ -109,8 +116,8 @@ class SignalBatcher:
                 results = process_and_save(
                     self.batch_messages,
                     self.batch_dates,
-                    jsonl_path="signals.jsonl",
-                    json_path="signals.json",
+                    jsonl_path=SIGNALS_JSONL,
+                    json_path=SIGNALS_JSON,
                 )
                 logger.debug(f"Parser returned {len(results) if results else 0} signals")
             except Exception as e:
