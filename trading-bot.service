@@ -1,0 +1,44 @@
+[Unit]
+Description=Trading Bot - Telegram Signal Processor
+After=network.target network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+Group=YOUR_USERNAME
+WorkingDirectory=/home/YOUR_USERNAME/trading-bot
+Environment="PATH=/home/YOUR_USERNAME/trading-bot/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Main process
+ExecStart=/home/YOUR_USERNAME/trading-bot/.venv/bin/python main.py
+
+# Restart configuration
+Restart=always
+RestartSec=10
+StartLimitBurst=5
+
+# Resource limits
+MemoryMax=1G
+CPUQuota=50%
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/YOUR_USERNAME/trading-bot/logs
+ReadWritePaths=/home/YOUR_USERNAME/trading-bot/cache
+ReadWritePaths=/home/YOUR_USERNAME/trading-bot
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=trading-bot
+
+[Install]
+WantedBy=multi-user.target

@@ -1,11 +1,47 @@
+# Python
 .venv/
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Data files
 *.json
 *.jsonl
 *.csv
+
+# Logs
 *.log
+*.log.*
+logs/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
 .DS_Store
 .vscode/
-.env
 .idea/
+*.swp
+*.swo
+*~
+
+# Telegram session
+telegram_session.session*
+
+# Cache
+cache/
+*.cache
+
+# Backups
+backups/
+*.backup
+
+# OS
+Thumbs.db
+Desktop.ini

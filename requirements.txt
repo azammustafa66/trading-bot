@@ -1,0 +1,12 @@
+# Core Dependencies
+telethon>=1.35.0
+python-dotenv>=1.0.0
+dhanhq>=2.0.0
+requests>=2.31.0
+polars>=0.20.0
+
+# Timezone support
+tzdata>=2024.1
+
+# Optional but recommended for production
+psutil>=5.9.0
