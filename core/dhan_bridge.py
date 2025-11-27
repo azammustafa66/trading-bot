@@ -63,6 +63,7 @@ class DhanBridge:
 
     def get_ltp(self, security_id, exchange_segment):
         if not self.access_token:
+            logger.warning("⚠️ No access token available, cannot fetch LTP")
             return None
         try:
             url = f"{self.base_url}/marketfeed/ltp"
@@ -80,17 +81,28 @@ class DhanBridge:
                 "Accept": "application/json",
             }
 
-            response = requests.post(url, headers=headers, json=payload)
+            logger.debug(f"Fetching LTP for {exchange_segment}:{security_id}")
+            response = requests.post(url, headers=headers, json=payload, timeout=10)
             data = response.json()
 
             if data.get("data"):
                 key = f"{exchange_segment}:{security_id}"
                 item = data["data"].get(key)
                 if item:
-                    return float(item.get("last_price", 0))
+                    ltp = float(item.get("last_price", 0))
+                    logger.debug(f"LTP for {security_id}: ₹{ltp}")
+                    return ltp
+
+            logger.warning(f"⚠️ No LTP data found for {exchange_segment}:{security_id}")
+            return None
+        except requests.exceptions.Timeout:
+            logger.error(f"❌ LTP fetch timeout for {security_id}")
+            return None
+        except requests.exceptions.RequestException as e:
+            logger.error(f"❌ LTP fetch network error: {e}")
             return None
         except Exception as e:
-            logger.error(f"LTP Fetch Error: {e}")
+            logger.error(f"❌ LTP fetch error: {e}", exc_info=True)
             return None
 
     def calculate_quantity(self, entry_price, sl_price, is_positional, lot_size):
@@ -116,7 +128,12 @@ class DhanBridge:
 
     def execute_super_order(self, signal):
         if not self.dhan:
+            logger.warning("⚠️ Dhan client not initialized, order skipped")
             return
+
+        logger.info("=" * 60)
+        logger.info("🚀 EXECUTING SUPER ORDER")
+        logger.info("=" * 60)
 
         try:
             # 1. Unpack Signal
@@ -127,16 +144,32 @@ class DhanBridge:
             is_positional = signal.get("is_positional", False)
             entry_price = float(signal.get("trigger_above") or 0)
 
+            logger.info(f"📝 Signal Details:")
+            logger.info(f"   - Symbol: {trade_sym}")
+            logger.info(f"   - Action: {action}")
+            logger.info(f"   - Entry Price: ₹{entry_price}")
+            logger.info(f"   - Positional: {is_positional}")
+
             target_date = self.parse_date_label(label)
+            logger.debug(f"Parsed expiry label '{label}' to date: {target_date}")
+
+            logger.info("🔍 Looking up security ID...")
             sec_id, exch_id, lot_size = self.mapper.get_security_id(trade_sym)
 
             if not sec_id:
-                logger.error(f"❌ ID Missing for {trade_sym}")
+                logger.error(f"❌ Security ID not found for {trade_sym}")
+                logger.error("💡 Possible reasons:")
+                logger.error("   1. Symbol format might be incorrect")
+                logger.error("   2. Contract might have expired")
+                logger.error("   3. CSV data might need refresh")
                 return
+
+            logger.info(f"✅ Security ID: {sec_id} | Exchange: {exch_id} | Lot Size: {lot_size}")
 
             exch_seg_str = (
                 "BSE_FNO" if (exch_id == "BSE" or sym == "SENSEX") else "NSE_FNO"
             )
+            logger.debug(f"Exchange segment: {exch_seg_str}")
 
             # 2. LTP Logic (Market vs Limit)
             current_ltp = self.get_ltp(sec_id, exch_seg_str)
@@ -195,19 +228,47 @@ class DhanBridge:
             logger.info(f"🚀 FIRING {order_type} ({product_type}): {trade_sym}")
 
             # 6. Execute
+            logger.info("📡 Sending order to Dhan API...")
             url = f"{self.base_url}/super/orders"
             headers = {
                 "access-token": self.access_token,
                 "Content-Type": "application/json",
             }
 
-            response = requests.post(url, headers=headers, json=payload)
-            data = response.json()
+            logger.debug(f"Order payload: {payload}")
 
-            if response.status_code == 200 or data.get("orderStatus") == "PENDING":
-                logger.info(f"🎉 SUCCESS! ID: {data.get('orderId')}")
-            else:
-                logger.error(f"⚠️ REJECTED: {data}")
+            try:
+                response = requests.post(url, headers=headers, json=payload, timeout=30)
+                data = response.json()
 
+                logger.info(f"📨 API Response Status: {response.status_code}")
+                logger.debug(f"API Response Body: {data}")
+
+                if response.status_code == 200 or data.get("orderStatus") == "PENDING":
+                    order_id = data.get("orderId", 'N/A')
+                    logger.info("=" * 60)
+                    logger.info("🎉 ORDER PLACED SUCCESSFULLY!")
+                    logger.info(f"   - Order ID: {order_id}")
+                    logger.info(f"   - Symbol: {trade_sym}")
+                    logger.info(f"   - Type: {order_type} ({product_type})")
+                    logger.info(f"   - Quantity: {qty}")
+                    logger.info(f"   - Price: ₹{price_to_send}")
+                    logger.info("=" * 60)
+                else:
+                    logger.error("=" * 60)
+                    logger.error("❌ ORDER REJECTED")
+                    logger.error(f"   - Status Code: {response.status_code}")
+                    logger.error(f"   - Response: {data}")
+                    logger.error("=" * 60)
+
+            except requests.exceptions.Timeout:
+                logger.error("❌ Order submission timeout - API took too long to respond")
+            except requests.exceptions.RequestException as e:
+                logger.error(f"❌ Network error during order submission: {e}")
+
+        except ValueError as e:
+            logger.error(f"❌ Invalid signal data: {e}", exc_info=True)
+        except KeyError as e:
+            logger.error(f"❌ Missing required field in signal: {e}", exc_info=True)
         except Exception as e:
-            logger.critical(f"Execution Error: {e}")
+            logger.critical(f"❌ Unexpected error during order execution: {e}", exc_info=True)

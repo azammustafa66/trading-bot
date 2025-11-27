@@ -38,18 +38,41 @@ class DhanMapper:
     def _ensure_csv(self):
         """Downloads the master CSV if it doesn't exist or is old."""
         if self._is_file_fresh():
+            logger.debug("CSV file is fresh, no download needed")
             return
 
         logger.info(f"⬇️ Downloading Dhan Scrip Master (~500MB)...")
+        logger.info("This may take a few minutes depending on your connection...")
+
         try:
-            with requests.get(self.url, stream=True) as r:
+            # Add timeout and better error handling
+            with requests.get(self.url, stream=True, timeout=60) as r:
                 r.raise_for_status()
+
+                # Get total size if available
+                total_size = int(r.headers.get('content-length', 0))
+                downloaded = 0
+
                 with open(self.csv_path, "wb") as f:
                     for chunk in r.iter_content(chunk_size=8192):
                         f.write(chunk)
+                        downloaded += len(chunk)
+
+                        # Log progress every 50MB
+                        if total_size > 0 and downloaded % (50 * 1024 * 1024) < 8192:
+                            progress = (downloaded / total_size) * 100
+                            logger.info(f"📥 Downloaded: {progress:.1f}%")
+
             logger.info("✅ Download complete.")
+        except requests.exceptions.Timeout:
+            logger.error("❌ Download failed: Connection timeout")
+            raise
+        except requests.exceptions.RequestException as e:
+            logger.error(f"❌ Download failed: {e}")
+            raise
         except Exception as e:
-            logger.error(f"Download failed: {e}")
+            logger.error(f"❌ Unexpected error during download: {e}", exc_info=True)
+            raise
 
     def get_security_id(self, trading_symbol):
         """
