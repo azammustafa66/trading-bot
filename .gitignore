@@ -45,3 +45,9 @@ backups/
 # OS
 Thumbs.db
 Desktop.ini
+
+# Scripts
+*.sh
+*.bat
+
+/scripts/README.md
