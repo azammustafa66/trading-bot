@@ -81,6 +81,48 @@ BATCH_DELAY_SECONDS = 2.0
 os.makedirs("data", exist_ok=True)
 
 
+# --- HELPER FUNCTIONS ---
+async def resolve_channel(client, target: str):
+    """
+    Robust channel resolution that tries multiple methods:
+    1. Numeric ID (e.g., -1001234567890)
+    2. Username (e.g., @channelname)
+    3. Search by exact title match (case-insensitive)
+    """
+    logger.info(f"🔍 Resolving channel: {target}")
+
+    # 1) Try numeric ID
+    if str(target).lstrip("-").isdigit():
+        try:
+            entity = await client.get_entity(int(target))
+            logger.info(f"✅ Resolved by ID: {getattr(entity, 'title', target)}")
+            return entity
+        except Exception as e:
+            logger.debug(f"Failed to resolve by ID: {e}")
+
+    # 2) Try username / raw get_entity (handles @username)
+    try:
+        entity = await client.get_entity(target)
+        logger.info(f"✅ Resolved by username: {getattr(entity, 'title', target)}")
+        return entity
+    except Exception as e:
+        logger.debug(f"Failed to resolve by username: {e}")
+
+    # 3) Search by title exact match (case-insensitive)
+    logger.info("🔍 Searching through your dialogs...")
+    async for d in client.iter_dialogs(limit=500):
+        title = getattr(d.entity, "title", None)
+        if title and title.lower() == target.lower():
+            logger.info(f"✅ Found by title: {title} (ID: {d.entity.id})")
+            return d.entity
+
+    # If we get here, nothing worked
+    raise ValueError(f"Cannot resolve channel '{target}'. Please check:\n"
+                    f"  1. Channel name/username is correct\n"
+                    f"  2. You are a member of the channel\n"
+                    f"  3. Try using @username or numeric ID instead")
+
+
 class SignalBatcher:
     def __init__(self, bridge_instance: DhanBridge):
         self.batch_messages = []
@@ -208,14 +250,25 @@ async def main():
         logger.critical(f"❌ Failed to connect to Telegram: {e}", exc_info=True)
         return
 
+    # 5. Resolve the target channel
+    try:
+        channel_entity = await resolve_channel(client, TARGET_CHANNEL)
+        channel_title = getattr(channel_entity, 'title', TARGET_CHANNEL)
+        channel_id = getattr(channel_entity, 'id', 'Unknown')
+    except Exception as e:
+        logger.critical(f"❌ Failed to resolve channel: {e}", exc_info=True)
+        logger.critical("💡 Check your TARGET_CHANNEL in .env file")
+        return
+
     logger.info("=" * 60)
-    logger.info(f"👀 Listening to: {TARGET_CHANNEL}")
+    logger.info(f"👀 Listening to: {channel_title}")
+    logger.info(f"   - Channel ID: {channel_id}")
     logger.info(f"⏰ Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info("Press Ctrl+C to stop.")
     logger.info("=" * 60)
 
-    # 5. Event Loop
-    @client.on(events.NewMessage(chats=TARGET_CHANNEL))
+    # 6. Event Loop
+    @client.on(events.NewMessage(chats=channel_entity))
     async def handler(event):
         try:
             text = event.message.message
