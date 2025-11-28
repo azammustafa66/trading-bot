@@ -8,7 +8,8 @@
 # ==============================================
 
 # Get the directory where this script is located
-PROJECT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 VENV_PYTHON="$PROJECT_DIR/.venv/bin/python"
 
 echo "[$(date)] ========================================"
