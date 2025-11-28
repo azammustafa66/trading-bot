@@ -1,13 +1,12 @@
-#!/usr/bin/env python3
 """
 Trading Bot Health Monitor
 Monitors the bot's health and can send alerts if issues are detected
 """
 
-import os
-import sys
 import json
 import logging
+import os
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -15,7 +14,7 @@ from pathlib import Path
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("Monitor")
 
@@ -40,7 +39,9 @@ class BotHealthMonitor:
                 return True
 
             # Check for systemd service
-            result = os.popen("systemctl is-active trading-bot 2>/dev/null").read().strip()
+            result = (
+                os.popen("systemctl is-active trading-bot 2>/dev/null").read().strip()
+            )
             if result == "active":
                 logger.info("✓ Bot process is running (systemd service)")
                 return True
@@ -63,7 +64,9 @@ class BotHealthMonitor:
             mtime = datetime.fromtimestamp(self.trade_log.stat().st_mtime)
             age = datetime.now() - mtime
             if age > timedelta(minutes=5):
-                issues.append(f"Main log hasn't been updated in {age.seconds // 60} minutes")
+                issues.append(
+                    f"Main log hasn't been updated in {age.seconds // 60} minutes"
+                )
             else:
                 logger.info(f"✓ Main log is active (last update: {age.seconds}s ago)")
 
@@ -100,12 +103,14 @@ class BotHealthMonitor:
             cutoff = datetime.now() - timedelta(hours=hours)
             error_count = 0
 
-            with open(self.error_log, 'r') as f:
+            with open(self.error_log, "r") as f:
                 for line in f:
                     try:
                         # Parse timestamp from log line
-                        timestamp_str = line.split('[')[0].strip()
-                        timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+                        timestamp_str = line.split("[")[0].strip()
+                        timestamp = datetime.strptime(
+                            timestamp_str, "%Y-%m-%d %H:%M:%S"
+                        )
                         if timestamp > cutoff:
                             error_count += 1
                     except:
@@ -119,31 +124,37 @@ class BotHealthMonitor:
     def check_signal_processing(self):
         """Check if signals are being processed"""
         if not self.signals_file.exists():
-            logger.warning("⚠ No signals file found (this is normal if bot just started)")
+            logger.warning(
+                "⚠ No signals file found (this is normal if bot just started)"
+            )
             return True
 
         try:
-            with open(self.signals_file, 'r') as f:
+            with open(self.signals_file, "r") as f:
                 signals = json.load(f)
 
             if not signals:
                 logger.info("ℹ No signals processed yet")
                 return True
 
-            latest_signal = max(signals, key=lambda x: x.get('timestamp', ''))
-            timestamp_str = latest_signal.get('timestamp', '')
+            latest_signal = max(signals, key=lambda x: x.get("timestamp", ""))
+            timestamp_str = latest_signal.get("timestamp", "")
 
             if timestamp_str:
                 # Parse timestamp
                 try:
-                    timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                    timestamp = datetime.fromisoformat(
+                        timestamp_str.replace("Z", "+00:00")
+                    )
                     # Remove timezone for comparison
                     if timestamp.tzinfo:
                         timestamp = timestamp.replace(tzinfo=None)
 
                     age = datetime.now() - timestamp
-                    logger.info(f"✓ Latest signal: {latest_signal.get('trading_symbol')} "
-                              f"({age.seconds // 60}m ago)")
+                    logger.info(
+                        f"✓ Latest signal: {latest_signal.get('trading_symbol')} "
+                        f"({age.seconds // 60}m ago)"
+                    )
                 except:
                     logger.warning("⚠ Could not parse signal timestamp")
 
