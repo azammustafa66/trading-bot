@@ -5,12 +5,13 @@ from datetime import datetime
 
 import requests
 from dhanhq import dhanhq
+from dotenv import load_dotenv
 
 from core.dhan_mapper import DhanMapper
 
 # Setup Logger
 logger = logging.getLogger("DhanBridge")
-
+load_dotenv()
 
 class DhanBridge:
     def __init__(self):
@@ -199,7 +200,7 @@ class DhanBridge:
 
             # 3. Strategy Params
             sl_price = float(signal.get("stop_loss") or (entry_price * 0.90))
-            target_price = round(entry_price * 5.0, 2)
+            target_price = round(entry_price * 10.0, 2)
             trailing_jump = round(entry_price * 0.05, 2)
             qty = self.calculate_quantity(
                 entry_price, sl_price, is_positional, lot_size
