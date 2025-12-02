@@ -13,6 +13,7 @@ from core.dhan_mapper import DhanMapper
 logger = logging.getLogger("DhanBridge")
 load_dotenv()
 
+
 class DhanBridge:
     def __init__(self):
         self.client_id = os.getenv("DHAN_CLIENT_ID")
@@ -63,21 +64,16 @@ class DhanBridge:
             return None
 
     def get_ltp(self, security_id, exchange_segment):
-        if not self.access_token:
+        if not self.access_token or not self.client_id:
             logger.warning("⚠️ No access token available, cannot fetch LTP")
             return None
         try:
             url = f"{self.base_url}/marketfeed/ltp"
-            payload = {
-                "instruments": [
-                    {
-                        "exchangeSegment": exchange_segment,
-                        "securityId": str(security_id),
-                    }
-                ]
-            }
+            payload = {exchange_segment: [int(security_id)]}
+
             headers = {
                 "access-token": self.access_token,
+                "client-id": self.client_id,
                 "Content-Type": "application/json",
                 "Accept": "application/json",
             }
@@ -87,10 +83,10 @@ class DhanBridge:
             data = response.json()
 
             if data.get("data"):
-                key = f"{exchange_segment}:{security_id}"
-                item = data["data"].get(key)
-                if item:
-                    ltp = float(item.get("last_price", 0))
+                segment_data = data["data"].get(exchange_segment, {})
+                security_data = segment_data.get(str(security_id))
+                if security_data:
+                    ltp = float(security_data.get("last_price", 0))
                     logger.debug(f"LTP for {security_id}: ₹{ltp}")
                     return ltp
 
@@ -165,7 +161,9 @@ class DhanBridge:
                 logger.error("   3. CSV data might need refresh")
                 return
 
-            logger.info(f"✅ Security ID: {sec_id} | Exchange: {exch_id} | Lot Size: {lot_size}")
+            logger.info(
+                f"✅ Security ID: {sec_id} | Exchange: {exch_id} | Lot Size: {lot_size}"
+            )
 
             exch_seg_str = (
                 "BSE_FNO" if (exch_id == "BSE" or sym == "SENSEX") else "NSE_FNO"
@@ -246,7 +244,7 @@ class DhanBridge:
                 logger.debug(f"API Response Body: {data}")
 
                 if response.status_code == 200 or data.get("orderStatus") == "PENDING":
-                    order_id = data.get("orderId", 'N/A')
+                    order_id = data.get("orderId", "N/A")
                     logger.info("=" * 60)
                     logger.info("🎉 ORDER PLACED SUCCESSFULLY!")
                     logger.info(f"   - Order ID: {order_id}")
@@ -263,7 +261,9 @@ class DhanBridge:
                     logger.error("=" * 60)
 
             except requests.exceptions.Timeout:
-                logger.error("❌ Order submission timeout - API took too long to respond")
+                logger.error(
+                    "❌ Order submission timeout - API took too long to respond"
+                )
             except requests.exceptions.RequestException as e:
                 logger.error(f"❌ Network error during order submission: {e}")
 
@@ -272,4 +272,6 @@ class DhanBridge:
         except KeyError as e:
             logger.error(f"❌ Missing required field in signal: {e}", exc_info=True)
         except Exception as e:
-            logger.critical(f"❌ Unexpected error during order execution: {e}", exc_info=True)
+            logger.critical(
+                f"❌ Unexpected error during order execution: {e}", exc_info=True
+            )

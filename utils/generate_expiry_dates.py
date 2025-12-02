@@ -73,7 +73,6 @@ def select_expiry_date(
     if u == "BANKNIFTY":
         # Rule: Last Tuesday of the month (Monthly)
 
-        # Check this month's last Tuesday
         current_month_last_tue = _last_weekday_of_month(
             today.year, today.month, TUESDAY
         )
@@ -97,7 +96,7 @@ def select_expiry_date(
 def select_expiry_label(
     underlying: str, reference_dt: Optional[datetime] = None
 ) -> str:
-    """Returns expiry in 'DD MMM' format (e.g., '27 NOV')."""
+    """Returns expiry in 'DD MMM' format ('27 NOV')."""
     d = select_expiry_date(underlying, reference_dt)
     return f"{d.day:02d} {d.strftime('%b').upper()}"
 
