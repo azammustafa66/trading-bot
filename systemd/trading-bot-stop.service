@@ -1,0 +1,10 @@
+[Unit]
+Description=Stop Trading Bot Service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl stop trading-bot.service
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target
