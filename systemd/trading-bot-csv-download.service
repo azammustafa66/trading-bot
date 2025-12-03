@@ -1,0 +1,22 @@
+[Unit]
+Description=Pre-download Dhan CSV for Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/trading_bot
+Environment="PATH=/opt/trading_bot/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Run the CSV download script
+ExecStart=/opt/trading_bot/.venv/bin/python -c "from core.dhan_mapper import DhanMapper; DhanMapper().download_csv()"
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=trading-bot-csv
+
+[Install]
+WantedBy=multi-user.target

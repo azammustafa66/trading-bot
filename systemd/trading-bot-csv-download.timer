@@ -1,0 +1,10 @@
+[Unit]
+Description=Download Dhan CSV at 8:50 AM (Mon-Fri)
+
+[Timer]
+# Run at 8:50 AM on weekdays (Mon-Fri)
+OnCalendar=Mon-Fri 08:50:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -8,9 +8,6 @@ from logging.handlers import RotatingFileHandler
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
 
-from core.dhan_bridge import DhanBridge
-from core.signal_parser import process_and_save
-
 # --- LOGGING SETUP ---
 # Load environment variables first
 load_dotenv()
@@ -64,6 +61,21 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger("LiveListener")
+
+# Setup global exception handler to catch uncaught exceptions
+def handle_uncaught_exception(exc_type, exc_value, exc_traceback):
+    """Log uncaught exceptions to file"""
+    if issubclass(exc_type, KeyboardInterrupt):
+        # Don't log keyboard interrupts
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+    logger.critical("Uncaught exception:", exc_info=(exc_type, exc_value, exc_traceback))
+
+sys.excepthook = handle_uncaught_exception
+
+# --- IMPORTS (after logging setup to ensure handlers are configured) ---
+from core.dhan_bridge import DhanBridge
+from core.signal_parser import process_and_save
 
 # --- CONFIGURATION ---
 TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID")
@@ -299,4 +311,5 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("🛑 Bot Stopped.")
     except Exception as e:
-        logger.critical(f"🔥 Critical Crash: {e}")
+        logger.critical(f"🔥 Critical Crash: {e}", exc_info=True)
+        sys.exit(1)
