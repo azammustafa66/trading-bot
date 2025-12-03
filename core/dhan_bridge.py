@@ -179,7 +179,7 @@ class DhanBridge:
                 if entry_price == 0:
                     entry_price = current_ltp
 
-                threshold = entry_price + (entry_price * 0.03)
+                threshold = entry_price + (entry_price * 0.05)
 
                 if current_ltp > threshold:
                     logger.warning(f"⚠️ SKIPPING: Price flew >3%. LTP: {current_ltp}")
