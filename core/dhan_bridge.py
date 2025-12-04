@@ -2,6 +2,7 @@ import logging
 import math
 import os
 from datetime import datetime
+from typing import Dict, Any
 
 import requests
 from dhanhq import dhanhq
@@ -63,7 +64,7 @@ class DhanBridge:
         except Exception:
             return None
 
-    def get_ltp(self, security_id, exchange_segment):
+    def get_ltp(self, security_id: str, exchange_segment: str):
         if not self.access_token or not self.client_id:
             logger.warning("⚠️ No access token available, cannot fetch LTP")
             return None
@@ -123,7 +124,7 @@ class DhanBridge:
         except Exception:
             return lot_size
 
-    def execute_super_order(self, signal):
+    def execute_super_order(self, signal: Dict[str, str | float | int | bool]):
         if not self.dhan:
             logger.warning("⚠️ Dhan client not initialized, order skipped")
             return
@@ -182,7 +183,7 @@ class DhanBridge:
                 threshold = entry_price + (entry_price * 0.05)
 
                 if current_ltp > threshold:
-                    logger.warning(f"⚠️ SKIPPING: Price flew >3%. LTP: {current_ltp}")
+                    logger.warning(f"⚠️ SKIPPING: Price flew >5%. LTP: {current_ltp}")
                     return
                 elif current_ltp >= entry_price:
                     logger.info(
@@ -206,7 +207,7 @@ class DhanBridge:
             product_type = "MARGIN" if is_positional else "INTRADAY"
 
             # 4. PRICE FIX: 0 for Market, Entry for Limit
-            price_to_send = entry_price if order_type == "LIMIT" else 0
+            price_to_send = entry_price + 1 if order_type == "LIMIT" else 0
 
             # 5. Payload
             payload = {
@@ -218,7 +219,7 @@ class DhanBridge:
                 "orderType": order_type,
                 "securityId": str(sec_id),
                 "quantity": int(qty),
-                "price": float(price_to_send),  # <--- 0 if Market, Entry if Limit
+                "price": float(price_to_send),
                 "targetPrice": float(target_price),
                 "stopLossPrice": float(sl_price),
                 "trailingJump": float(trailing_jump),

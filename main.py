@@ -28,12 +28,14 @@ file_handler = RotatingFileHandler(
     mode="a",
     maxBytes=MAX_LOG_SIZE,
     backupCount=LOG_BACKUP_COUNT,
-    encoding="utf-8"
+    encoding="utf-8",
 )
-file_handler.setFormatter(logging.Formatter(
-    "%(asctime)s [%(levelname)s] [%(name)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-))
+file_handler.setFormatter(
+    logging.Formatter(
+        "%(asctime)s [%(levelname)s] [%(name)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+)
 
 # Setup error-only log file
 error_handler = RotatingFileHandler(
@@ -41,28 +43,30 @@ error_handler = RotatingFileHandler(
     mode="a",
     maxBytes=MAX_LOG_SIZE,
     backupCount=LOG_BACKUP_COUNT,
-    encoding="utf-8"
+    encoding="utf-8",
 )
 error_handler.setLevel(logging.ERROR)
-error_handler.setFormatter(logging.Formatter(
-    "%(asctime)s [%(levelname)s] [%(name)s] [%(filename)s:%(lineno)d] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-))
+error_handler.setFormatter(
+    logging.Formatter(
+        "%(asctime)s [%(levelname)s] [%(name)s] [%(filename)s:%(lineno)d] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+)
 
 # Setup console handler
 console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setFormatter(logging.Formatter(
-    "%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S"
-))
+console_handler.setFormatter(
+    logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
+)
 
 # Configure root logger
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
-    handlers=[file_handler, error_handler, console_handler]
+    handlers=[file_handler, error_handler, console_handler],
 )
 
 logger = logging.getLogger("LiveListener")
+
 
 # Setup global exception handler to catch uncaught exceptions
 def handle_uncaught_exception(exc_type, exc_value, exc_traceback):
@@ -71,7 +75,10 @@ def handle_uncaught_exception(exc_type, exc_value, exc_traceback):
         # Don't log keyboard interrupts
         sys.__excepthook__(exc_type, exc_value, exc_traceback)
         return
-    logger.critical("Uncaught exception:", exc_info=(exc_type, exc_value, exc_traceback))
+    logger.critical(
+        "Uncaught exception:", exc_info=(exc_type, exc_value, exc_traceback)
+    )
+
 
 sys.excepthook = handle_uncaught_exception
 
@@ -97,6 +104,7 @@ os.makedirs("data", exist_ok=True)
 # --- SHUTDOWN HANDLING ---
 shutdown_event = asyncio.Event()
 
+
 def handle_shutdown_signal(signum, frame):
     """Handle shutdown signals (SIGTERM, SIGINT) with proper logging"""
     sig_name = signal.Signals(signum).name
@@ -106,9 +114,10 @@ def handle_shutdown_signal(signum, frame):
     logger.info("=" * 60)
     shutdown_event.set()
 
+
 # Register signal handlers
 signal.signal(signal.SIGTERM, handle_shutdown_signal)  # systemd stop
-signal.signal(signal.SIGINT, handle_shutdown_signal)   # Ctrl+C
+signal.signal(signal.SIGINT, handle_shutdown_signal)  # Ctrl+C
 
 
 # --- HELPER FUNCTIONS ---
@@ -147,10 +156,12 @@ async def resolve_channel(client, target: str):
             return d.entity
 
     # If we get here, nothing worked
-    raise ValueError(f"Cannot resolve channel '{target}'. Please check:\n"
-                    f"  1. Channel name/username is correct\n"
-                    f"  2. You are a member of the channel\n"
-                    f"  3. Try using @username or numeric ID instead")
+    raise ValueError(
+        f"Cannot resolve channel '{target}'. Please check:\n"
+        f"  1. Channel name/username is correct\n"
+        f"  2. You are a member of the channel\n"
+        f"  3. Try using @username or numeric ID instead"
+    )
 
 
 class SignalBatcher:
@@ -191,7 +202,9 @@ class SignalBatcher:
                     jsonl_path=SIGNALS_JSONL,
                     json_path=SIGNALS_JSON,
                 )
-                logger.debug(f"Parser returned {len(results) if results else 0} signals")
+                logger.debug(
+                    f"Parser returned {len(results) if results else 0} signals"
+                )
             except Exception as e:
                 logger.error(f"❌ Signal parsing failed: {e}", exc_info=True)
                 results = []
@@ -213,7 +226,7 @@ class SignalBatcher:
                     except Exception as e:
                         logger.error(
                             f"❌ Order execution failed for {res['trading_symbol']}: {e}",
-                            exc_info=True
+                            exc_info=True,
                         )
             else:
                 logger.info("ℹ️  No valid signals found in batch.")
@@ -272,7 +285,9 @@ async def main():
     logger.info("🔌 Connecting to Telegram...")
     try:
         client = TelegramClient(
-            session=SESSION_NAME, api_id=int(TELEGRAM_API_ID), api_hash=TELEGRAM_API_HASH
+            session=SESSION_NAME,
+            api_id=int(TELEGRAM_API_ID),
+            api_hash=TELEGRAM_API_HASH,
         )
         await client.start()  # pyright: ignore[reportGeneralTypeIssues]
         logger.info("✅ Connected to Telegram successfully")
@@ -283,8 +298,8 @@ async def main():
     # 5. Resolve the target channel
     try:
         channel_entity = await resolve_channel(client, TARGET_CHANNEL)
-        channel_title = getattr(channel_entity, 'title', TARGET_CHANNEL)
-        channel_id = getattr(channel_entity, 'id', 'Unknown')
+        channel_title = getattr(channel_entity, "title", TARGET_CHANNEL)
+        channel_id = getattr(channel_entity, "id", "Unknown")
     except Exception as e:
         logger.critical(f"❌ Failed to resolve channel: {e}", exc_info=True)
         logger.critical("💡 Check your TARGET_CHANNEL in .env file")
