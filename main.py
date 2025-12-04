@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import signal
 import sys
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
@@ -91,6 +92,22 @@ BATCH_DELAY_SECONDS = 2.0
 
 # Create data directory if it doesn't exist
 os.makedirs("data", exist_ok=True)
+
+# --- SHUTDOWN HANDLING ---
+shutdown_event = asyncio.Event()
+
+def handle_shutdown_signal(signum, frame):
+    """Handle shutdown signals (SIGTERM, SIGINT) with proper logging"""
+    sig_name = signal.Signals(signum).name
+    logger.info("=" * 60)
+    logger.info(f"🛑 Received {sig_name} - Shutting down gracefully...")
+    logger.info(f"⏰ Stopped at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info("=" * 60)
+    shutdown_event.set()
+
+# Register signal handlers
+signal.signal(signal.SIGTERM, handle_shutdown_signal)  # systemd stop
+signal.signal(signal.SIGINT, handle_shutdown_signal)   # Ctrl+C
 
 
 # --- HELPER FUNCTIONS ---
@@ -309,7 +326,10 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("🛑 Bot Stopped.")
+        logger.info("=" * 60)
+        logger.info("🛑 Bot Stopped (Keyboard Interrupt)")
+        logger.info(f"⏰ Stopped at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info("=" * 60)
     except Exception as e:
         logger.critical(f"🔥 Critical Crash: {e}", exc_info=True)
         sys.exit(1)
