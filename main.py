@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 
@@ -87,7 +88,7 @@ TARGET_CHANNEL = os.getenv("TARGET_CHANNEL")
 SIGNALS_JSONL = os.getenv("SIGNALS_JSONL", "data/signals.jsonl")
 SIGNALS_JSON = os.getenv("SIGNALS_JSON", "data/signals.json")
 
-BATCH_DELAY_SECONDS = 2.0
+BATCH_DELAY_SECONDS = 5
 
 # Create data directory if it doesn't exist
 os.makedirs("data", exist_ok=True)
@@ -189,8 +190,8 @@ class SignalBatcher:
                         f"Positional: {res.get('is_positional', False)}"
                     )
 
-                    # The Magic Line: Fires the Super Order
                     try:
+                        time.sleep(2.5)
                         self.bridge.execute_super_order(res)
                     except Exception as e:
                         logger.error(
