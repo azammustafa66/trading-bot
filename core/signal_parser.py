@@ -51,8 +51,8 @@ logger = logging.getLogger("Parser")
 
 MARKET_OPEN_TIME = time(9, 15)
 DEDUPE_WINDOW_MINUTES = int(os.getenv("DEDUPE_WINDOW_MINUTES", "60"))
-SIGNALS_JSONL = os.getenv("SIGNALS_JSONL", "signals.jsonl")
-SIGNALS_JSON = os.getenv("SIGNALS_JSON", "signals.json")
+SIGNALS_JSONL = '../data/signals.jsonl'
+SIGNALS_JSON = '../data/signals.json'
 
 IGNORE_KEYWORDS = [
     "RISK TRAIL",
