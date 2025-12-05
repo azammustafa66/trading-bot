@@ -177,24 +177,38 @@ def parse_single_block(
     if detect_positional(clean_text):
         out["is_positional"] = True
 
-    # 3. Extract Action
-    if "BUY" in clean_text:
-        out["action"] = "BUY"
-    elif "SELL" in clean_text:
-        out["action"] = "SELL"
+    # 3-5. Extract Action + Underlying + Strike + Option Type (Dynamic Pattern)
+    # Pattern: BUY/SELL <SYMBOL> <STRIKE> <CE/PE>
+    # This works for both indices (NIFTY, BANKNIFTY) and stocks (RELIANCE, TCS, etc.)
+    pattern = r"(BUY|SELL)\s+([A-Z][A-Z0-9]*?)\s+(\d{3,6})\s*(CE|PE|C|P|CALL|PUT)\b"
+    match = re.search(pattern, clean_text)
 
-    # 4. Extract Underlying
-    out["underlying"] = detect_underlying(text)
-
-    # 5. Extract Strike + Option Type
-    strike_match = re.search(r"\b(\d{4,6})\s*(CE|PE|C|P|CALL|PUT)?\b", clean_text)
-    if strike_match:
-        out["strike"] = int(strike_match.group(1))
-        opt_str = strike_match.group(2) or ""
+    if match:
+        out["action"] = match.group(1)  # BUY or SELL
+        out["underlying"] = match.group(2)  # NIFTY, RELIANCE, TCS, etc.
+        out["strike"] = int(match.group(3))  # Strike price
+        opt_str = match.group(4) or ""
         if opt_str.startswith(("C", "CALL")):
             out["option_type"] = "CALL"
         if opt_str.startswith(("P", "PUT")):
             out["option_type"] = "PUT"
+    else:
+        # Fallback: Try old logic for backwards compatibility
+        if "BUY" in clean_text:
+            out["action"] = "BUY"
+        elif "SELL" in clean_text:
+            out["action"] = "SELL"
+
+        out["underlying"] = detect_underlying(text)
+
+        strike_match = re.search(r"\b(\d{3,6})\s*(CE|PE|C|P|CALL|PUT)?\b", clean_text)
+        if strike_match:
+            out["strike"] = int(strike_match.group(1))
+            opt_str = strike_match.group(2) or ""
+            if opt_str.startswith(("C", "CALL")):
+                out["option_type"] = "CALL"
+            if opt_str.startswith(("P", "PUT")):
+                out["option_type"] = "PUT"
 
     # 6. Extract Trigger Price ("Above 120")
     trigger_match = re.search(r"\bABOVE\s+(\d+)", clean_text)

@@ -10,9 +10,6 @@ KOLKATA: Final = ZoneInfo("Asia/Kolkata")
 TUESDAY: Final[int] = 1
 THURSDAY: Final[int] = 3
 
-UnderlyingType = Literal["NIFTY", "BANKNIFTY", "SENSEX"]
-
-
 def _next_weekday_on_or_after(start: date, weekday: int) -> date:
     """Return the next date >= start that matches the given weekday."""
     days_ahead = (weekday - start.weekday()) % 7
@@ -37,10 +34,11 @@ def select_expiry_date(
     Calculates expiry date based on rules:
       - NIFTY: Coming Tuesday (Weekly)
       - SENSEX: Coming Thursday (Weekly)
-      - BANKNIFTY: Last Tuesday of current month if valid, else Last Tuesday of next month.
+      - BANKNIFTY: Last Tuesday of current month (Monthly)
+      - STOCKS: Last Thursday of current month (Monthly) - same as BANKNIFTY monthly expiry
 
     Args:
-        underlying: 'NIFTY' | 'BANKNIFTY' | 'SENSEX'
+        underlying: Stock symbol (e.g., 'NIFTY', 'BANKNIFTY', 'RELIANCE', 'TCS', etc.)
         reference_dt: Awareness-agnostic datetime. Defaults to current IST if None.
     """
     if not isinstance(underlying, str):
@@ -63,26 +61,23 @@ def select_expiry_date(
 
     # 2. Apply Expiry Rules
     if u == "NIFTY":
-        # Rule: Every Tuesday
+        # Rule: Every Tuesday (Weekly)
         return _next_weekday_on_or_after(today, TUESDAY)
 
     if u == "SENSEX":
-        # Rule: Every Thursday
+        # Rule: Every Thursday (Weekly)
         return _next_weekday_on_or_after(today, THURSDAY)
 
     if u == "BANKNIFTY":
         # Rule: Last Tuesday of the month (Monthly)
-
-        # Check this month's last Tuesday
         current_month_last_tue = _last_weekday_of_month(
             today.year, today.month, TUESDAY
         )
 
-        # If today is on or before this month's expiry, return it
         if current_month_last_tue >= today:
             return current_month_last_tue
 
-        # Otherwise, move to next month's last Tuesday
+        # Move to next month's last Tuesday
         next_month = today.month + 1
         next_year = today.year
         if next_month > 12:
@@ -91,7 +86,23 @@ def select_expiry_date(
 
         return _last_weekday_of_month(next_year, next_month, TUESDAY)
 
-    raise ValueError(f"Unknown underlying: {underlying}")
+    # Default: Stock options (Monthly - Last Thursday, same as BANKNIFTY monthly expiry)
+    # This handles RELIANCE, TCS, INFY, and any other stock options dynamically
+    current_month_last_thu = _last_weekday_of_month(
+        today.year, today.month, THURSDAY
+    )
+
+    if current_month_last_thu >= today:
+        return current_month_last_thu
+
+    # Move to next month's last Thursday
+    next_month = today.month + 1
+    next_year = today.year
+    if next_month > 12:
+        next_month = 1
+        next_year += 1
+
+    return _last_weekday_of_month(next_year, next_month, THURSDAY)
 
 
 def select_expiry_label(
