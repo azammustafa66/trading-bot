@@ -97,10 +97,9 @@ trading-bot/
 ## 🚀 Installation
 
 ### Prerequisites
-- Ubuntu/Linux server
 - Python 3.9+
 - Dhan trading account with API access
-- Telegram account
+- Telegram account with API access
 
 ### Step 1: Clone Repository
 ```bash
@@ -288,37 +287,6 @@ When entry executes:
 ./start_bot.sh restart
 ```
 
-### "Cannot find entity" Error
-- Update `TELEGRAM_CHANNEL` in `.env`
-- Try channel ID (numeric), username (@channel), or exact display name
-- Check channel resolution in logs
-
-### CSV Download Issues
-```bash
-# Manually trigger CSV download
-source .venv/bin/activate
-python -c "from core.dhan_mapper import DhanMapper; DhanMapper().download_csv()"
-```
-
-### Orders Not Executing
-1. Check Dhan credentials in `.env`
-2. Verify `DHAN_ACCESS_TOKEN` is valid (expires daily)
-3. Check logs for API errors: `grep "ERROR" logs/errors.log`
-4. Verify signal parsing: `grep "Signal Details" logs/trade_logs.log`
-
-### Cron Jobs Not Running
-```bash
-# Check cron service
-sudo systemctl status cron
-
-# View cron logs
-grep CRON /var/log/syslog
-
-# Re-setup schedule
-cd scripts
-./setup_schedule.sh
-```
-
 ## 📈 Performance & Monitoring
 
 ### Log Rotation
@@ -336,13 +304,6 @@ cd scripts
 - One signal per line (JSON format)
 - Includes timestamp, symbol, prices, execution status
 
-## 🔐 Security
-
-- Never commit `.env` file (contains API keys)
-- Rotate Dhan access token daily
-- Use secure server with SSH key auth
-- Restrict file permissions: `chmod 600 .env`
-
 ## 📝 API Documentation
 
 - **Dhan Super Order API**: https://dhanhq.co/docs/v2/super-order/
@@ -355,12 +316,6 @@ This is a personal trading bot. For issues or suggestions, please create an issu
 ## ⚠️ Disclaimer
 
 **Trading involves risk. This bot is for educational purposes only. Use at your own risk.**
-
-- Past performance doesn't guarantee future results
-- Always test with paper trading first
-- Never invest more than you can afford to lose
-- Ensure you understand options trading before using this bot
-- The author is not responsible for any financial losses
 
 ## 📧 Support
 

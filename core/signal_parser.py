@@ -16,7 +16,8 @@ try:
                                              select_expiry_label)
 except ImportError:
     try:
-        sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        sys.path.append(os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__))))
         from utils.generate_expiry_dates import (select_expiry_date,
                                                  select_expiry_label)
     except ImportError:
@@ -37,7 +38,6 @@ load_dotenv()
 
 try:
     from zoneinfo import ZoneInfo
-
     IST = ZoneInfo("Asia/Kolkata")
 except ImportError:
     IST = None
@@ -99,6 +99,31 @@ def detect_positional(text: str) -> bool:
     )
 
 
+def extract_stock_name(text: str) -> Optional[str]:
+    """
+    Captures text between BUY/SELL and the Strike Price for Stocks.
+    Pattern: BUY <STOCK NAME> <STRIKE> <CE/PE>
+    """
+    # 1. (?:BUY|SELL)       -> Start with Action
+    # 2. \s+                -> Space
+    # 3. ([A-Z0-9\s\&\-]+?) -> CAPTURE GROUP 1: The Stock Name (Non-greedy)
+    # 4. \s+                -> Space
+    # 5. (\d+(?:\.\d+)?)    -> The Strike Price (Integer or Float)
+    # 6. \s* -> Optional Space
+    # 7. (?:CE|PE...)       -> Lookahead for Option Type validation
+
+    pattern = r"(?:BUY|SELL)\s+([A-Z0-9\s\&\-]+?)\s+(\d+(?:\.\d+)?)\s*(?:CE|PE|C|P|CALL|PUT)"
+    match = re.search(pattern, text.upper())
+
+    if match:
+        raw_name = match.group(1).strip()
+        # Safety Filter: Ensure captured name isn't a keyword
+        if raw_name in ["ABOVE", "BELOW", "AT", "NEAR", "THE", "RANGE"]:
+            return None
+        return raw_name
+    return None
+
+
 def detect_underlying(text: str) -> Optional[str]:
     up = text.upper()
 
@@ -106,13 +131,22 @@ def detect_underlying(text: str) -> Optional[str]:
     if "FINNIFTY" in up or "MIDCP" in up or "MIDCAP" in up:
         return None
 
+    # 1. Priority: Hardcoded Indices
     if "BANKNIFTY" in up or "BANK NIFTY" in up:
         return "BANKNIFTY"
-    # Use word boundary to ensure NIFTY doesn't match FINNIFTY if logic slips
+    # Use word boundary to ensure NIFTY doesn't match NIFTYBEES or FINNIFTY
     if re.search(r"\bNIFTY\b", up):
         return "NIFTY"
     if "SENSEX" in up or "SNSEX" in up:
         return "SENSEX"
+
+    # 2. Fallback: Generic Stock Extraction
+    stock_name = extract_stock_name(text)
+    if stock_name:
+        # Clean up common spaces in stock names (e.g., "TATA STEEL" -> "TATASTEEL")
+        # Dhan usually uses condensed names, but mapper handles exact matches.
+        return stock_name.replace(" ", "")
+
     return None
 
 
@@ -161,7 +195,7 @@ def parse_single_block(
         "is_positional": False,
         "trading_symbol": None,
         "ignore": False,
-        "expiry_label": None,  # Added key for clarity
+        "expiry_label": None,
     }
 
     # 1. Fast Fail Filters
@@ -183,28 +217,37 @@ def parse_single_block(
     elif "SELL" in clean_text:
         out["action"] = "SELL"
 
-    # 4. Extract Underlying
+    # 4. Extract Underlying (Indices OR Stocks)
     out["underlying"] = detect_underlying(text)
 
     # 5. Extract Strike + Option Type
-    strike_match = re.search(r"\b(\d{4,6})\s*(CE|PE|C|P|CALL|PUT)?\b", clean_text)
+    # Updated Regex to support FLOAT strikes (e.g. 157.5) common in stocks
+    strike_match = re.search(
+        r"\b(\d{4,6}|\d{2,5}(?:\.\d+)?)\s*(CE|PE|C|P|CALL|PUT)?\b", clean_text)
     if strike_match:
-        out["strike"] = int(strike_match.group(1))
+        raw_strike = strike_match.group(1)
+        # Store as float if decimal, else int
+        if '.' in raw_strike:
+            out["strike"] = float(raw_strike)
+        else:
+            out["strike"] = int(raw_strike)
+
         opt_str = strike_match.group(2) or ""
         if opt_str.startswith(("C", "CALL")):
             out["option_type"] = "CALL"
         if opt_str.startswith(("P", "PUT")):
             out["option_type"] = "PUT"
 
-    # 6. Extract Trigger Price ("Above 120")
-    trigger_match = re.search(r"\bABOVE\s+(\d+)", clean_text)
+    # 6. Extract Trigger Price ("Above 120.5")
+    trigger_match = re.search(r"\bABOVE\s+(\d+(?:\.\d+)?)", clean_text)
     if trigger_match:
-        out["trigger_above"] = int(trigger_match.group(1))
+        out["trigger_above"] = float(trigger_match.group(1))
 
-    # 7. Extract Stop Loss ("SL 80")
-    sl_match = re.search(r"(?:SL|STOP\s*LOSS)[\s:\-]*(\d+)", clean_text)
+    # 7. Extract Stop Loss ("SL 80.5")
+    sl_match = re.search(
+        r"(?:SL|STOP\s*LOSS)[\s:\-]*(\d+(?:\.\d+)?)", clean_text)
     if sl_match:
-        out["stop_loss"] = int(sl_match.group(1))
+        out["stop_loss"] = float(sl_match.group(1))
 
     # 8. Generate Trading Symbol
     if out["underlying"] and out["strike"] and out["option_type"]:
@@ -215,17 +258,21 @@ def parse_single_block(
             if manual_date:
                 label = manual_date
             else:
-                # Use Auto-Calculation (Next Thu/Tue)
+                # Use Auto-Calculation (Indices=Weekly, Stocks=Monthly)
+                # Logic resides in utils/generate_expiry_dates.py
                 ref_d = reference_date or date.today()
                 ref_dt = datetime.combine(ref_d, time(9, 15))
                 label = select_expiry_label(
                     underlying=out["underlying"], reference_dt=ref_dt
                 )
 
+            out["expiry_label"] = label
+
+            # Formatting: "BANKNIFTY 05 DEC 45000 CALL" or "RELIANCE 29 DEC 2500 CALL"
             out["trading_symbol"] = (
                 f"{out['underlying']} {label} {out['strike']} {out['option_type']}"
             )
-            out["expiry_label"] = label
+
         except Exception as e:
             logger.warning(f"Symbol Gen Failed: {e}")
             out["ignore"] = True
@@ -275,7 +322,6 @@ def process_and_save(
         signal = parse_single_block(buffer, reference_date=ref_date)
 
         # Validation: Must have Symbol AND (Trigger OR SL)
-        # This filters out partial chat messages
         if signal["trading_symbol"] and not signal["ignore"]:
             if signal["trigger_above"] or signal["stop_loss"]:
 
@@ -283,7 +329,8 @@ def process_and_save(
                     signal["timestamp"] = ref_time.isoformat()
                     parsed_signals.append(signal)
                 else:
-                    logger.debug(f"Skipped Pre-market: {signal['trading_symbol']}")
+                    logger.debug(
+                        f"Skipped Pre-market: {signal['trading_symbol']}")
 
         buffer = ""
         buffer_dates = []
@@ -295,32 +342,30 @@ def process_and_save(
         if "FUTURES" in text.upper():
             continue
 
-        # --- Stitching Logic (The Brain) ---
+        # --- Stitching Logic ---
 
         # 1. Detect Start of New Signal
         is_start_keyword = detect_positional(text)
-
         has_action = bool(re.search(r"\b(BUY|SELL)\b", text.upper()))
         has_symbol = detect_underlying(text) is not None
 
         # Strong Start: Keyword OR (Action + Symbol)
         is_strong_new = is_start_keyword or (has_action and has_symbol)
 
-        # 2. Detect Separators (End of Signal)
+        # 2. Detect Separators
         is_ignore_line = any(k in text.upper() for k in IGNORE_KEYWORDS)
         is_price_noise = is_price_only(text)
 
-        # 3. Partial Logic (Hold buffer if incomplete)
+        # 3. Partial Logic
         buffer_is_partial = is_partial_signal(buffer) if buffer else False
 
-        # 4. Stale Check (If buffer is > 5 mins old, force flush)
+        # 4. Stale Check (> 5 mins)
         current_ts = to_ist(dt)
         last_ts = to_ist(buffer_dates[-1]) if buffer_dates else current_ts
         is_stale = (current_ts and last_ts) and (
             current_ts - last_ts
         ).total_seconds() > 300
 
-        # Decision: Should we flush the OLD buffer before adding NEW text?
         should_flush = False
 
         if not buffer:
@@ -328,17 +373,14 @@ def process_and_save(
         elif is_stale:
             should_flush = True
         elif is_strong_new:
-            # New strong signal ALWAYS flushes old buffer
-            # EXCEPT if the buffer was just a "Positional" tag waiting for this line
+            # Exception: "Positional" tag followed by signal
             if buffer.strip().upper() in ["POSITIONAL", "RISKY", "POSITIONAL RISKY"]:
-                should_flush = False  # Allow stitching "Positional" + "Buy Nifty"
+                should_flush = False
             else:
                 should_flush = True
         elif buffer_is_partial:
-            # Buffer waiting for price. Only flush if HARD ignore keyword.
             should_flush = is_ignore_line
         else:
-            # Buffer looks complete. Flush if we see noise/separators.
             should_flush = is_ignore_line or is_price_noise
 
         if should_flush:
@@ -347,7 +389,7 @@ def process_and_save(
         buffer = (buffer + "\n" + text) if buffer else text
         buffer_dates.append(dt)
 
-    flush_buffer()  # Final flush for the last item
+    flush_buffer()  # Final flush
 
     # --- Deduplication & Saving ---
     new_unique = []
@@ -397,13 +439,14 @@ def process_and_save(
 if __name__ == "__main__":
     print(f"\n🧪 Running Test Suite [Time: {now_ist()}]")
 
-    mock_now = datetime(2025, 12, 2, 10, 0, 0)
+    mock_now = datetime(2025, 12, 30, 10, 0, 0)
     if IST:
         mock_now = mock_now.replace(tzinfo=IST)
 
     test_stream = [
         # 1. Messy One-Liner
         "BANKNIFTY 43500 PE BUY ABOVE 320 SL 280 TARGET 400",
+        "SENSEX 87500 CE BUY ABOVE 420 SL 380 TARGET 500",
         # 2. Scrambled
         "SENSEX 86000 CE",
         "ABOVE 500",
@@ -438,11 +481,16 @@ if __name__ == "__main__":
         "Buy Sensex 86000 PE",
         "100",
         "SL 50",
-        # 9. Your Specific Case (Multi-line Positional)
+        # 9. Multi-line Positional
         "Risky",
         "Buy Banknifty 58700 ce above 420",
         "sl 385",
         "target 5%...550",
+        # 10. Stocks
+        "Risky",
+        "BUY RELIANCE 2500 CE above 80",
+        "SL 60",
+        "target 5%....50%"
     ]
 
     test_dates = [mock_now for _ in test_stream]
@@ -459,7 +507,8 @@ if __name__ == "__main__":
     print("-" * 65)
 
     for r in results:
-        trig = str(r["trigger_above"]) if r["trigger_above"] is not None else "---"
+        trig = str(r["trigger_above"]
+                   ) if r["trigger_above"] is not None else "---"
         sl = str(r["stop_loss"]) if r["stop_loss"] is not None else "---"
         pos = "YES" if r["is_positional"] else "NO"
         print(

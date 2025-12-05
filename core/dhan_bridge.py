@@ -2,7 +2,7 @@ import logging
 import math
 import os
 from datetime import datetime
-from typing import Dict, Any
+from typing import Any, Dict
 
 import requests
 from dhanhq import dhanhq
@@ -21,6 +21,15 @@ class DhanBridge:
         self.access_token = os.getenv("DHAN_ACCESS_TOKEN")
         self.base_url = "https://api.dhan.co/v2"
 
+        # 1. OPTIMIZATION: Use Session for faster connections
+        self.session = requests.Session()
+        if self.access_token:
+            self.session.headers.update({
+                "access-token": self.access_token,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            })
+
         if self.client_id and self.access_token:
             self.dhan = dhanhq(self.client_id, self.access_token)
             logger.info("✅ Dhan Bridge Connected")
@@ -30,249 +39,153 @@ class DhanBridge:
 
         self.mapper = DhanMapper()
 
-        self.lot_sizes = {"NIFTY": 75, "BANKNIFTY": 35, "SENSEX": 20}
-
-        # Risk per trade
+        # Risk Configuration
         self.RISK_INTRADAY = 3500
         self.RISK_POSITIONAL = 5000
 
-    def parse_date_label(self, label):
-        try:
-            if not label:
-                return None
-            parts = label.split()
-            day, mon_str = int(parts[0]), parts[1]
-            month_map = {
-                "JAN": 1,
-                "FEB": 2,
-                "MAR": 3,
-                "APR": 4,
-                "MAY": 5,
-                "JUN": 6,
-                "JUL": 7,
-                "AUG": 8,
-                "SEP": 9,
-                "OCT": 10,
-                "NOV": 11,
-                "DEC": 12,
-            }
+    @staticmethod
+    def round_to_tick(price: float, tick: float = 0.05) -> float:
+        """
+        CRITICAL: Rounds price to nearest 0.05.
+        APIs reject prices like 100.3333; they must be 100.35.
+        """
+        return round(round(price / tick) * tick, 2)
 
-            now = datetime.now()
-            month = month_map[mon_str.upper()]
-            year = now.year if month >= now.month else now.year + 1
-            return datetime(year, month, day).date()
-        except Exception:
-            return None
-
-    def get_ltp(self, security_id: str, exchange_segment: str):
-        if not self.access_token or not self.client_id:
-            logger.warning("⚠️ No access token available, cannot fetch LTP")
+    def get_ltp(self, security_id: str, exchange_segment: str) -> float | None:
+        """Fetches the latest market price using the active session."""
+        if not self.access_token:
             return None
         try:
             url = f"{self.base_url}/marketfeed/ltp"
-            payload = {exchange_segment: [int(security_id)]}
-
-            headers = {
-                "access-token": self.access_token,
-                "client-id": self.client_id,
-                "Content-Type": "application/json",
-                "Accept": "application/json",
+            payload = {
+                "instruments": [
+                    {"exchangeSegment": exchange_segment,
+                        "securityId": str(security_id)}
+                ]
             }
 
-            logger.debug(f"Fetching LTP for {exchange_segment}:{security_id}")
-            response = requests.post(url, headers=headers, json=payload, timeout=10)
+            response = self.session.post(url, json=payload, timeout=5)
             data = response.json()
 
             if data.get("data"):
-                segment_data = data["data"].get(exchange_segment, {})
-                security_data = segment_data.get(str(security_id))
-                if security_data:
-                    ltp = float(security_data.get("last_price", 0))
-                    logger.debug(f"LTP for {security_id}: ₹{ltp}")
-                    return ltp
-
-            logger.warning(f"⚠️ No LTP data found for {exchange_segment}:{security_id}")
-            return None
-        except requests.exceptions.Timeout:
-            logger.error(f"❌ LTP fetch timeout for {security_id}")
-            return None
-        except requests.exceptions.RequestException as e:
-            logger.error(f"❌ LTP fetch network error: {e}")
+                key = f"{exchange_segment}:{security_id}"
+                item = data["data"].get(key)
+                if item:
+                    return float(item.get("last_price", 0))
             return None
         except Exception as e:
-            logger.error(f"❌ LTP fetch error: {e}", exc_info=True)
+            logger.error(f"❌ LTP fetch error: {e}")
             return None
 
-    def calculate_quantity(self, entry_price, sl_price, is_positional, lot_size):
+    def calculate_quantity(self, entry_price: float, sl_price: float, is_positional: bool, lot_size: int) -> int:
+        """Calculates position size based on defined risk per trade."""
         try:
             risk_capital = self.RISK_POSITIONAL if is_positional else self.RISK_INTRADAY
-            sl_gap = abs(entry_price - sl_price)
 
-            if sl_gap < 1:
-                return lot_size
+            sl_gap = abs(entry_price - sl_price)
+            if sl_gap < 1.0:
+                sl_gap = 1.0  # Prevent infinite quantity on tight SL
 
             raw_qty = risk_capital / sl_gap
-            num_lots = round(raw_qty / lot_size)
-            if num_lots < 1:
-                num_lots = 1
 
-            final_qty = math.ceil(num_lots * lot_size)
+            # Ensure at least 1 lot
+            num_lots = max(1, round(raw_qty / lot_size))
+            final_qty = int(num_lots * lot_size)
+
             logger.info(
-                f"🧮 Qty Calc: Risk ₹{risk_capital} | Gap {sl_gap:.1f} | {num_lots} Lots -> {final_qty}"
-            )
+                f"🧮 Qty Calc: Risk ₹{risk_capital} | Gap {sl_gap:.2f} | {num_lots} Lots -> {final_qty}")
             return final_qty
         except Exception:
             return lot_size
 
-    def execute_super_order(self, signal: Dict[str, str | float | int | bool]):
+    def execute_super_order(self, signal: Dict[str, Any]):
+        """
+        Executes a 'Super Order' (Entry + Target + SL).
+        """
         if not self.dhan:
             logger.warning("⚠️ Dhan client not initialized, order skipped")
             return
 
         logger.info("=" * 60)
         logger.info("🚀 EXECUTING SUPER ORDER")
-        logger.info("=" * 60)
 
         try:
             # 1. Unpack Signal
             sym = signal.get("underlying")
             trade_sym = signal.get("trading_symbol")
-            label = signal.get("expiry_label")
             action = signal.get("action")
             is_positional = signal.get("is_positional", False)
             entry_price = float(signal.get("trigger_above") or 0)
+            sl_price = float(signal.get("stop_loss") or (entry_price * 0.90))
 
-            logger.info(f"📝 Signal Details:")
-            logger.info(f"   - Symbol: {trade_sym}")
-            logger.info(f"   - Action: {action}")
-            logger.info(f"   - Entry Price: ₹{entry_price}")
-            logger.info(f"   - Positional: {is_positional}")
-
-            target_date = self.parse_date_label(label)
-            logger.debug(f"Parsed expiry label '{label}' to date: {target_date}")
-
-            logger.info("🔍 Looking up security ID...")
+            # 2. Map Security (Uses Mapper for ID and Lot Size)
             sec_id, exch_id, lot_size = self.mapper.get_security_id(trade_sym)
 
-            if not sec_id:
+            if not sec_id or lot_size == -1:
                 logger.error(f"❌ Security ID not found for {trade_sym}")
-                logger.error("💡 Possible reasons:")
-                logger.error("   1. Symbol format might be incorrect")
-                logger.error("   2. Contract might have expired")
-                logger.error("   3. CSV data might need refresh")
                 return
 
-            logger.info(
-                f"✅ Security ID: {sec_id} | Exchange: {exch_id} | Lot Size: {lot_size}"
-            )
+            # 3. Determine Exchange Segment
+            # Logic: If SENSEX/BANKEX (BSE) -> BSE_FNO. Everything else (NIFTY, STOCKS) -> NSE_FNO.
+            exch_seg = "BSE_FNO" if (
+                exch_id == "BSE" or sym == "SENSEX") else "NSE_FNO"
 
-            exch_seg_str = (
-                "BSE_FNO" if (exch_id == "BSE" or sym == "SENSEX") else "NSE_FNO"
-            )
-            logger.debug(f"Exchange segment: {exch_seg_str}")
-
-            # 2. LTP Logic (Market vs Limit)
-            current_ltp = self.get_ltp(sec_id, exch_seg_str)
-
+            # 4. LTP Logic & Order Type
+            current_ltp = self.get_ltp(sec_id, exch_seg)
             order_type = "LIMIT"
 
-            if current_ltp:
-                if entry_price == 0:
-                    entry_price = current_ltp
-
-                threshold = entry_price + (entry_price * 0.05)
-
-                if current_ltp > threshold:
-                    logger.warning(f"⚠️ SKIPPING: Price flew >5%. LTP: {current_ltp}")
-                    return
-                elif current_ltp >= entry_price:
+            if current_ltp and entry_price > 0:
+                if current_ltp >= entry_price:
                     logger.info(
-                        f"⚡ BREAKOUT ({current_ltp} > {entry_price}). MARKET Order."
-                    )
+                        f"⚡ MOMENTUM: LTP {current_ltp} >= {entry_price}. Switching to MARKET.")
                     order_type = "MARKET"
-                else:
-                    logger.info(f"⏳ Waiting for trigger. LIMIT Order.")
-                    order_type = "LIMIT"
-            else:
-                if entry_price == 0:
-                    return
 
-            # 3. Strategy Params
-            sl_price = float(signal.get("stop_loss") or (entry_price * 0.90))
-            target_price = round(entry_price * 10.0, 2)
-            trailing_jump = round(entry_price * 0.05, 2)
+            # 5. Price Calculations & Rounding (CRITICAL FIX)
+            # We calculate Target/SL relative to entry, then ROUND them to valid ticks.
+            target_price = entry_price * 1.10
+
+            price_to_send = self.round_to_tick(
+                entry_price) if order_type == "LIMIT" else 0
+            target_price = self.round_to_tick(target_price)
+            sl_price = self.round_to_tick(sl_price)
+            trailing_jump = self.round_to_tick(
+                entry_price * 0.05)
+
             qty = self.calculate_quantity(
-                entry_price, sl_price, is_positional, lot_size
-            )
+                entry_price, sl_price, is_positional, lot_size)
             product_type = "MARGIN" if is_positional else "INTRADAY"
 
-            # 4. PRICE FIX: 0 for Market, Entry for Limit
-            price_to_send = entry_price + 1 if order_type == "LIMIT" else 0
-
-            # 5. Payload
+            # 6. Payload
             payload = {
                 "dhanClientId": self.client_id,
                 "correlationId": f"BOT-{int(datetime.now().timestamp())}",
                 "transactionType": "BUY" if action == "BUY" else "SELL",
-                "exchangeSegment": exch_seg_str,
+                "exchangeSegment": exch_seg,
                 "productType": product_type,
                 "orderType": order_type,
                 "securityId": str(sec_id),
                 "quantity": int(qty),
                 "price": float(price_to_send),
+                "validity": "DAY",
+
+                # Super Order Specific Fields
                 "targetPrice": float(target_price),
                 "stopLossPrice": float(sl_price),
-                "trailingJump": float(trailing_jump),
+                "trailingJump": float(trailing_jump)
             }
 
-            logger.info(f"🚀 FIRING {order_type} ({product_type}): {trade_sym}")
+            logger.info(f"🚀 SENDING {order_type}: {trade_sym} on {exch_seg}")
+            logger.debug(f"Payload: {payload}")
 
-            # 6. Execute
-            logger.info("📡 Sending order to Dhan API...")
+            # 7. Execute
             url = f"{self.base_url}/super/orders"
-            headers = {
-                "access-token": self.access_token,
-                "Content-Type": "application/json",
-            }
+            response = self.session.post(url, json=payload, timeout=10)
+            data = response.json()
 
-            logger.debug(f"Order payload: {payload}")
+            if response.status_code in [200, 201] and data.get("orderStatus") in ["PENDING", "TRADED", "TRANSIT"]:
+                logger.info(f"🎉 SUCCESS: Order ID {data.get('orderId')}")
+            else:
+                logger.error(f"❌ FAILED: {data}")
 
-            try:
-                response = requests.post(url, headers=headers, json=payload, timeout=30)
-                data = response.json()
-
-                logger.info(f"📨 API Response Status: {response.status_code}")
-                logger.debug(f"API Response Body: {data}")
-
-                if response.status_code == 200 or data.get("orderStatus") == "PENDING":
-                    order_id = data.get("orderId", "N/A")
-                    logger.info("=" * 60)
-                    logger.info("🎉 ORDER PLACED SUCCESSFULLY!")
-                    logger.info(f"   - Order ID: {order_id}")
-                    logger.info(f"   - Symbol: {trade_sym}")
-                    logger.info(f"   - Type: {order_type} ({product_type})")
-                    logger.info(f"   - Quantity: {qty}")
-                    logger.info(f"   - Price: ₹{price_to_send}")
-                    logger.info("=" * 60)
-                else:
-                    logger.error("=" * 60)
-                    logger.error("❌ ORDER REJECTED")
-                    logger.error(f"   - Status Code: {response.status_code}")
-                    logger.error(f"   - Response: {data}")
-                    logger.error("=" * 60)
-
-            except requests.exceptions.Timeout:
-                logger.error(
-                    "❌ Order submission timeout - API took too long to respond"
-                )
-            except requests.exceptions.RequestException as e:
-                logger.error(f"❌ Network error during order submission: {e}")
-
-        except ValueError as e:
-            logger.error(f"❌ Invalid signal data: {e}", exc_info=True)
-        except KeyError as e:
-            logger.error(f"❌ Missing required field in signal: {e}", exc_info=True)
         except Exception as e:
-            logger.critical(
-                f"❌ Unexpected error during order execution: {e}", exc_info=True
-            )
+            logger.critical(f"❌ Order Execution Error: {e}", exc_info=True)
