@@ -310,7 +310,6 @@ def process_and_save(
             continue
 
         # NOTE: IGNORE_KEYWORDS in parse_single_block handles "FUT/FUTURES" check.
-        # We don't continue here to allow proper block parsing logic (e.g. flushing old buffers)
 
         is_start_keyword = detect_positional(text)
         has_action = bool(re.search(r"\b(BUY|SELL)\b", text.upper()))
