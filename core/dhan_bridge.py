@@ -9,7 +9,6 @@ from dotenv import load_dotenv
 
 from core.dhan_mapper import DhanMapper
 
-# Setup Logger
 logger = logging.getLogger("DhanBridge")
 load_dotenv()
 
@@ -36,7 +35,6 @@ class DhanBridge:
         else:
             self.dhan = None
             logger.warning("⚠️ Running in Mock Mode")
-
 
     @staticmethod
     def round_to_tick(price: float, tick: float = 0.05) -> float:
@@ -136,13 +134,13 @@ class DhanBridge:
             action = signal.get("action")
             is_positional = signal.get("is_positional", False)
             entry_price = float(signal.get("trigger_above") or 0)
-            sl_price = float(signal.get("stop_loss") or (entry_price * 0.90))
+            sl_price = float(signal.get("stop_loss") or 0)
 
             # 2. Map Security (Uses Mapper for ID and Lot Size)
             sec_id, exch_id, lot_size = self.mapper.get_security_id(trade_sym)
 
             if not sec_id or lot_size == -1:
-                logger.error(f"❌ Security ID not found for {trade_sym}")
+                logger.error(f"Security ID not found for {trade_sym}")
                 return
 
             # 3. Determine Exchange Segment
@@ -162,8 +160,26 @@ class DhanBridge:
 
             target_price = entry_price * 10
 
+            anchor_price = entry_price
+            if anchor_price == 0 and current_ltp:
+                anchor_price = current_ltp
+
+            if sl_price == 0 and anchor_price > 0:
+                raw_text = signal.get("raw", "").upper()
+
+                if "HERO ZERO" in raw_text or "HEROZERO" in raw_text:
+                    sl_price = 0.05
+                    logger.info("Hero Zero Detected: SL set to 0.05")
+
+                else:
+                    sl_buffer = 15.0
+                    sl_price = anchor_price - sl_buffer
+
+                if sl_price <= 0:
+                    sl_price = 0.05
+
             price_to_send = (
-                self.round_to_tick(entry_price) if order_type == "LIMIT" else 0
+                self.round_to_tick(entry_price + 0.5) if order_type == "LIMIT" else 0
             )
             target_price = self.round_to_tick(target_price)
             sl_price = self.round_to_tick(sl_price)

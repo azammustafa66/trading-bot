@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import signal
 import sys
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
@@ -8,7 +9,6 @@ from logging.handlers import RotatingFileHandler
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
 
-# --- LOGGING SETUP ---
 load_dotenv()
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -70,7 +70,6 @@ def handle_uncaught_exception(exc_type, exc_value, exc_traceback):
 
 sys.excepthook = handle_uncaught_exception
 
-# --- IMPORTS ---
 try:
     from core.dhan_bridge import DhanBridge
     from core.signal_parser import process_and_save
@@ -85,8 +84,6 @@ TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID")
 TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
 SESSION_NAME = os.getenv("SESSION_NAME", "telegram_session")
 
-# SUPPORT MULTIPLE CHANNELS (Comma Separated)
-# Tries TARGET_CHANNELS first, falls back to legacy TARGET_CHANNEL
 RAW_CHANNELS = os.getenv("TARGET_CHANNELS", os.getenv("TARGET_CHANNEL", ""))
 TARGET_CHANNELS = [x.strip() for x in RAW_CHANNELS.split(",") if x.strip()]
 
@@ -95,6 +92,22 @@ SIGNALS_JSON = os.getenv("SIGNALS_JSON", "data/signals.json")
 BATCH_DELAY_SECONDS = 2.0
 
 os.makedirs("data", exist_ok=True)
+
+
+# --- SHUTDOWN HANDLING ---
+def handle_shutdown_signal(signum, frame):
+    """Handle shutdown signals (SIGTERM, SIGINT) with proper logging and clean exit"""
+    sig_name = signal.Signals(signum).name
+    logger.info("=" * 60)
+    logger.info(f"🛑 Received {sig_name} - Shutting down gracefully...")
+    logger.info(f"⏰ Stopped at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info("=" * 60)
+    sys.exit(0)
+
+
+# Register signal handlers
+signal.signal(signal.SIGTERM, handle_shutdown_signal) 
+signal.signal(signal.SIGINT, handle_shutdown_signal)
 
 
 # --- HELPER FUNCTIONS ---
@@ -314,7 +327,10 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("🛑 Bot Stopped.")
+        logger.info("=" * 60)
+        logger.info("🛑 Bot Stopped (Keyboard Interrupt)")
+        logger.info(f"⏰ Stopped at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info("=" * 60)
     except Exception as e:
         logger.critical(f"🔥 Critical Crash: {e}", exc_info=True)
         sys.exit(1)
