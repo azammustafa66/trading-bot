@@ -6,7 +6,7 @@ import os
 import re
 import sys
 from datetime import date, datetime, time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from dotenv import load_dotenv
 
@@ -166,21 +166,21 @@ def is_price_only(text: str) -> bool:
 
 def parse_single_block(
     text: str, reference_date: Optional[date] = None
-) -> Dict[str, Any]:
+) -> Dict[str, Union[str, int, float]]:
     clean_text = text.strip().upper()
 
     out: Dict[str, Any] = {
         "raw": text.strip(),
-        "action": None,
-        "underlying": None,
-        "strike": None,
-        "option_type": None,
-        "stop_loss": None,
-        "trigger_above": None,
+        "action": '',
+        "underlying": '',
+        "strike": 0,
+        "option_type": '',
+        "stop_loss": 0,
+        "trigger_above": 0,
         "is_positional": False,
-        "trading_symbol": None,
+        "trading_symbol": '',
         "ignore": False,
-        "expiry_label": None,
+        "expiry_label": '',
     }
 
     # 1. Fast Fail Filters (Checks IGNORE_KEYWORDS including FUTURES)
