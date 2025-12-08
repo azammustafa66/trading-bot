@@ -160,23 +160,26 @@ class DhanBridge:
 
             target_price = entry_price * 10
 
+            # HeroZero or if SL is not provided
             anchor_price = entry_price
             if anchor_price == 0 and current_ltp:
                 anchor_price = current_ltp
+                
+            hero_keywords = {"HERO ZERO", "HEROZERO", "ZERO HERO", "ZEROHERO"}
 
             if sl_price == 0 and anchor_price > 0:
                 raw_text = signal.get("raw", "").upper()
 
-                if "HERO ZERO" in raw_text or "HEROZERO" in raw_text:
+                hero_detected = any(keyword in raw_text for keyword in hero_keywords)
+
+                if hero_detected:
                     sl_price = 0.05
                     logger.info("Hero Zero Detected: SL set to 0.05")
-
                 else:
-                    sl_buffer = 15.0
-                    sl_price = anchor_price - sl_buffer
+                    sl_price = anchor_price - 15.0
 
-                if sl_price <= 0:
-                    sl_price = 0.05
+                # Safety fallback
+                sl_price = max(sl_price, 0.05)
 
             price_to_send = (
                 self.round_to_tick(entry_price + 0.5) if order_type == "LIMIT" else 0
