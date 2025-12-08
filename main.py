@@ -94,16 +94,15 @@ BATCH_DELAY_SECONDS = 2.0
 os.makedirs("data", exist_ok=True)
 
 # --- SHUTDOWN HANDLING ---
-shutdown_event = asyncio.Event()
-
 def handle_shutdown_signal(signum, frame):
-    """Handle shutdown signals (SIGTERM, SIGINT) with proper logging"""
+    """Handle shutdown signals (SIGTERM, SIGINT) with proper logging and clean exit"""
     sig_name = signal.Signals(signum).name
     logger.info("=" * 60)
     logger.info(f"🛑 Received {sig_name} - Shutting down gracefully...")
     logger.info(f"⏰ Stopped at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info("=" * 60)
-    shutdown_event.set()
+    # Exit cleanly
+    sys.exit(0)
 
 # Register signal handlers
 signal.signal(signal.SIGTERM, handle_shutdown_signal)  # systemd stop
