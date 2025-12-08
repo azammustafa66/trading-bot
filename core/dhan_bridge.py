@@ -98,7 +98,7 @@ class DhanBridge:
         try:
             available_funds = self.get_funds()
             total_funds = available_funds if available_funds is not None else 0
-            risk_capital = total_funds * 0.02 if is_positional else total_funds * 0.015
+            risk_capital = total_funds * 0.02 if is_positional else total_funds * 0.0125
 
             sl_gap = abs(entry_price - sl_price)
             if sl_gap < 1.0:
