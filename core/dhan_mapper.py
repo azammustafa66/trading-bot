@@ -39,7 +39,7 @@ class DhanMapper:
         if self._is_file_fresh():
             return
 
-        logger.info(f'⬇️ Downloading Dhan Scrip Master (~500MB)...')
+        logger.info(f'Downloading Dhan Scrip Master (~500MB)...')
         logger.info('This may take a few minutes depending on your connection...')
 
         try:
@@ -50,15 +50,15 @@ class DhanMapper:
                     for chunk in r.iter_content(chunk_size=8192):
                         f.write(chunk)
 
-            logger.info('✅ Download complete.')
+            logger.info('Download complete.')
         except requests.exceptions.Timeout:
-            logger.error('❌ Download failed: Connection timeout')
+            logger.error('Download failed: Connection timeout')
             raise
         except requests.exceptions.RequestException as e:
-            logger.error(f'❌ Download failed: {e}')
+            logger.error(f'Download failed: {e}')
             raise
         except Exception as e:
-            logger.error(f'❌ Unexpected error during download: {e}', exc_info=True)
+            logger.error(f'Unexpected error during download: {e}', exc_info=True)
             raise
 
     def get_security_id(self, trading_symbol):
@@ -106,7 +106,7 @@ class DhanMapper:
 
                 return sec_id, exch, lot_size
 
-            logger.warning(f'❌ ID Not Found for: {trading_symbol} (Checked NSE Only for Stocks)')
+            logger.warning(f'ID Not Found for: {trading_symbol} (Checked NSE Only for Stocks)')
             return '', '', -1
 
         except Exception as e:
@@ -114,9 +114,8 @@ class DhanMapper:
             return '', '', -1
 
 
-# --- TEST SUITE ---
 if __name__ == '__main__':
-    print('\n🔬 INSTANTIATING MAPPER & RUNNING TESTS')
+    print('\nINSTANTIATING MAPPER & RUNNING TESTS')
     mapper = DhanMapper()
 
     test_cases = [
@@ -125,7 +124,7 @@ if __name__ == '__main__':
         'RELIANCE 30 DEC 1500 CALL',
     ]
 
-    print(f'\n📊 Testing {len(test_cases)} symbols...')
+    print(f'Testing {len(test_cases)} symbols...')
     print('-' * 65)
     print(f'{"SYMBOL":<30} | {"ID":<10} | {"EXCH":<5} | {"LOT"}')
     print('-' * 65)

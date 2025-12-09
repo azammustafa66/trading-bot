@@ -85,7 +85,7 @@ TARGET_CHANNELS = [x.strip() for x in RAW_CHANNELS.split(',') if x.strip()]
 
 SIGNALS_JSONL = os.getenv('SIGNALS_JSONL', 'data/signals.jsonl')
 SIGNALS_JSON = os.getenv('SIGNALS_JSON', 'data/signals.json')
-BATCH_DELAY_SECONDS = 2.0
+BATCH_DELAY_SECONDS = 1.5
 
 os.makedirs('data', exist_ok=True)
 
@@ -95,8 +95,8 @@ def handle_shutdown_signal(signum, frame):
     """Handle shutdown signals (SIGTERM, SIGINT) with proper logging and clean exit"""
     sig_name = signal.Signals(signum).name
     logger.info('=' * 60)
-    logger.info(f'🛑 Received {sig_name} - Shutting down gracefully...')
-    logger.info(f'⏰ Stopped at: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
+    logger.info(f'Received {sig_name} - Shutting down gracefully...')
+    logger.info(f'Stopped at: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
     logger.info('=' * 60)
     sys.exit(0)
 
@@ -120,7 +120,7 @@ async def resolve_channel(client: TelegramClient, target: str):
     if str(target).lstrip('-').isdigit():
         try:
             entity = await client.get_entity(int(target))
-            logger.info(f'✅ Resolved by ID: {getattr(entity, "title", target)}')
+            logger.info(f'Resolved by ID: {getattr(entity, "title", target)}')
             return entity
         except Exception as e:
             logger.debug(f'Failed to resolve by ID: {e}')
@@ -129,7 +129,7 @@ async def resolve_channel(client: TelegramClient, target: str):
     try:
         entity = await client.get_entity(target)
         title = getattr(entity, 'title', getattr(entity, 'username', target))
-        logger.info(f'✅ Resolved by username/entity: {title}')
+        logger.info(f'Resolved by username/entity: {title}')
         return entity
     except Exception as e:
         logger.debug(f'Failed to resolve by username: {e}')
@@ -139,7 +139,7 @@ async def resolve_channel(client: TelegramClient, target: str):
     async for d in client.iter_dialogs(limit=500):
         title = getattr(d.entity, 'title', '')
         if title and title.lower() == target.lower():
-            logger.info(f'✅ Found by title: {title} (ID: {d.entity.id})')
+            logger.info(f'Found by title: {title} (ID: {d.entity.id})')
             return d.entity
 
     raise ValueError(f'Could not resolve channel: {target}')
@@ -185,10 +185,10 @@ class SignalBatcher:
 
             # 2. EXECUTE TRADES
             if results:
-                logger.info(f'✅ Found {len(results)} valid signal(s)')
+                logger.info(f'Found {len(results)} valid signal(s)')
                 for idx, res in enumerate(results, 1):
                     logger.info(
-                        f'📊 Signal {idx}/{len(results)}: {res["trading_symbol"]} | '
+                        f'Signal {idx}/{len(results)}: {res["trading_symbol"]} | '
                         f'{res["action"]} | Entry: {res.get("trigger_above", "N/A")} | '
                         f'SL: {res.get("stop_loss", "N/A")}'
                     )
@@ -197,16 +197,16 @@ class SignalBatcher:
                         self.bridge.execute_super_order(res)
                     except Exception as e:
                         logger.error(
-                            f'❌ Order execution failed for {res["trading_symbol"]}: {e}',
+                            f'Order execution failed for {res["trading_symbol"]}: {e}',
                             exc_info=True,
                         )
             else:
-                logger.info('ℹ️  No valid signals found in batch.')
+                logger.info('No valid signals found in batch.')
 
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            logger.error(f'❌ Batch processing error: {e}', exc_info=True)
+            logger.error(f'Batch processing error: {e}', exc_info=True)
         finally:
             current_task = asyncio.current_task()
             if current_task and not current_task.cancelled():
@@ -218,7 +218,7 @@ class SignalBatcher:
 
 async def main():
     logger.info('=' * 60)
-    logger.info('🤖 Trading Bot Starting (Multi-Channel Support)...')
+    logger.info('Trading Bot Starting (Multi-Channel Support)...')
     logger.info('=' * 60)
 
     # 1. Validation
@@ -289,7 +289,6 @@ async def main():
             if not text:
                 return
 
-            # Log source channel
             chat_title = 'Unknown'
             try:
                 chat = await event.get_chat()

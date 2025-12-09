@@ -437,7 +437,7 @@ if __name__ == '__main__':
         json_path='test_signals.json',
     )
 
-    print(f'\n📊 Processed {len(results)} signals.\n')
+    print(f'\nProcessed {len(results)} signals.\n')
     print(f'{"SYMBOL":<35} | {"ACTION":<5} | {"TRIG":<5} | {"SL":<5} | {"POS"}')
     print('-' * 65)
 

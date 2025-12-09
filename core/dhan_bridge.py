@@ -81,6 +81,10 @@ class DhanBridge:
             response = self.session.post(url, json=payload, timeout=5)
             data = response.json()
 
+            if not data.get('data'):
+                logger.error(f'LTP Failed. API Response: {data}')
+                return None
+
             if data.get('data'):
                 key = f'{exchange_segment}:{security_id}'
                 item = data['data'].get(key)
