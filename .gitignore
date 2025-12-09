@@ -7,6 +7,7 @@ __pycache__/
 .Python
 pip-log.txt
 pip-delete-this-directory.txt
+.ruff_cache/
 
 # Data files
 *.json
@@ -52,3 +53,5 @@ Desktop.ini
 
 /scripts/README.md
 *.ipynb
+
+old_configs/

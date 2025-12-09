@@ -4,21 +4,20 @@ from typing import Final, Optional, Set
 from zoneinfo import ZoneInfo
 
 # --- CONFIGURATION ---
-KOLKATA: Final = ZoneInfo("Asia/Kolkata")
+KOLKATA: Final = ZoneInfo('Asia/Kolkata')
 TUESDAY: Final[int] = 1
 THURSDAY: Final[int] = 3
 
 TRADING_HOLIDAYS: Final[Set[date]] = {
     # --- 2025 ---
     date(2025, 12, 25),  # Christmas
-
     # --- 2026 (Projected) ---
     date(2026, 1, 26),  # Republic Day
-    date(2026, 3, 3),   # Holi (Approx)
+    date(2026, 3, 3),  # Holi (Approx)
     date(2026, 3, 27),  # Ram Navami
-    date(2026, 4, 3),   # Good Friday
+    date(2026, 4, 3),  # Good Friday
     date(2026, 4, 14),  # Ambedkar Jayanti
-    date(2026, 5, 1),   # Maharashtra Day
+    date(2026, 5, 1),  # Maharashtra Day
 }
 
 
@@ -78,13 +77,13 @@ def select_expiry_date(underlying: str, reference_dt: Optional[datetime] = None)
     calculated_date = today  # Default
 
     # --- RULE 1: WEEKLY INDICES ---
-    if u == "NIFTY":
+    if u == 'NIFTY':
         calculated_date = _next_weekday_on_or_after(today, TUESDAY)
         # UNCOMMENT TO ACTIVATE HOLIDAY LOGIC FOR NIFTY:
         # calculated_date = _adjust_for_holiday(calculated_date)
         return calculated_date
 
-    if u == "SENSEX":
+    if u == 'SENSEX':
         calculated_date = _next_weekday_on_or_after(today, THURSDAY)
         # --- ACTIVE HOLIDAY LOGIC (USER REQUEST) ---
         # Checks if Thursday is a holiday (e.g., 25 Dec 2025).
@@ -95,13 +94,12 @@ def select_expiry_date(underlying: str, reference_dt: Optional[datetime] = None)
     # --- RULE 2: MONTHLY (BANKNIFTY vs STOCKS) ---
 
     # 1. Calculate THIS month's expiry (Last Tuesday)
-    current_month_exp = _last_weekday_of_month(
-        today.year, today.month, TUESDAY)
+    current_month_exp = _last_weekday_of_month(today.year, today.month, TUESDAY)
 
     # 2. Define Rollover Condition
     should_rollover = False
 
-    if u == "BANKNIFTY":
+    if u == 'BANKNIFTY':
         if today > current_month_exp:
             should_rollover = True
     else:
@@ -116,8 +114,7 @@ def select_expiry_date(underlying: str, reference_dt: Optional[datetime] = None)
         if next_month > 12:
             next_month = 1
             next_year += 1
-        calculated_date = _last_weekday_of_month(
-            next_year, next_month, TUESDAY)
+        calculated_date = _last_weekday_of_month(next_year, next_month, TUESDAY)
     else:
         calculated_date = current_month_exp
 
@@ -130,36 +127,35 @@ def select_expiry_date(underlying: str, reference_dt: Optional[datetime] = None)
 def select_expiry_label(underlying: str, reference_dt: Optional[datetime] = None) -> str:
     """Returns expiry in 'DD MMM' format (e.g., '27 NOV')."""
     d = select_expiry_date(underlying, reference_dt)
-    return f"{d.day:02d} {d.strftime('%b').upper()}"
+    return f'{d.day:02d} {d.strftime("%b").upper()}'
 
 
 # --- Testing Block ---
-if __name__ == "__main__":
-    print("\n🗓️  EXPIRY DATE CALCULATOR (STOCKS vs BANKNIFTY)")
-    print("=" * 65)
+if __name__ == '__main__':
+    print('\n🗓️  EXPIRY DATE CALCULATOR (STOCKS vs BANKNIFTY)')
+    print('=' * 65)
 
     # TEST CASE: Today is Tuesday, 25 Nov 2025 (The Last Tuesday/Expiry Day)
     mock_today = datetime(2025, 11, 25, 9, 15)
 
-    print(
-        f"Testing Reference Date: {mock_today.strftime('%Y-%m-%d %A')} (EXPIRY DAY)\n")
+    print(f'Testing Reference Date: {mock_today.strftime("%Y-%m-%d %A")} (EXPIRY DAY)\n')
 
-    test_cases = ["NIFTY", "SENSEX", "BANKNIFTY", "RELIANCE"]
+    test_cases = ['NIFTY', 'SENSEX', 'BANKNIFTY', 'RELIANCE']
 
-    print(f"{'SYMBOL':<12} | {'EXPIRY DATE':<12} | {'STATUS'}")
-    print("-" * 65)
+    print(f'{"SYMBOL":<12} | {"EXPIRY DATE":<12} | {"STATUS"}')
+    print('-' * 65)
 
     for sym in test_cases:
         exp_date = select_expiry_date(sym, mock_today)
         label = select_expiry_label(sym, mock_today)
 
-        status = "Normal"
+        status = 'Normal'
         if exp_date == mock_today.date():
-            status = "Today (0DTE)"
+            status = 'Today (0DTE)'
         elif exp_date.month > mock_today.month:
-            status = "Rolled Over (Next Month)"
+            status = 'Rolled Over (Next Month)'
 
-        print(f"{sym:<12} | {label:<12} | {status}")
+        print(f'{sym:<12} | {label:<12} | {status}')
 
-    print("=" * 65)
-    print("Notice: BANKNIFTY trades today, RELIANCE moved to Dec.")
+    print('=' * 65)
+    print('Notice: BANKNIFTY trades today, RELIANCE moved to Dec.')
