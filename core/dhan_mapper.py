@@ -74,7 +74,10 @@ class DhanMapper:
                 .filter(
                     (pl.col('SEM_CUSTOM_SYMBOL') == trading_symbol)
                     & (
-                        ((pl.col('SEM_INSTRUMENT_NAME') == 'OPTSTK') & (pl.col('SEM_EXM_EXCH_ID') == 'NSE'))
+                        (
+                            (pl.col('SEM_INSTRUMENT_NAME') == 'OPTSTK')
+                            & (pl.col('SEM_EXM_EXCH_ID') == 'NSE')
+                        )
                         | (
                             (pl.col('SEM_INSTRUMENT_NAME') == 'OPTIDX')
                             & (pl.col('SEM_EXM_EXCH_ID').is_in(['NSE', 'BSE']))
@@ -116,7 +119,11 @@ if __name__ == '__main__':
     print('\n🔬 INSTANTIATING MAPPER & RUNNING TESTS')
     mapper = DhanMapper()
 
-    test_cases = ['BANKNIFTY 30 DEC 69700 CALL', 'SENSEX 11 DEC 85500 CALL', 'RELIANCE 30 DEC 1500 CALL']
+    test_cases = [
+        'BANKNIFTY 30 DEC 69700 CALL',
+        'SENSEX 11 DEC 85500 CALL',
+        'RELIANCE 30 DEC 1500 CALL',
+    ]
 
     print(f'\n📊 Testing {len(test_cases)} symbols...')
     print('-' * 65)

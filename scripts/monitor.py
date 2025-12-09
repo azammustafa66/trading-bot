@@ -141,7 +141,9 @@ class BotHealthMonitor:
                         timestamp = timestamp.replace(tzinfo=None)
 
                     age = datetime.now() - timestamp
-                    logger.info(f'✓ Latest signal: {latest_signal.get("trading_symbol")} ({age.seconds // 60}m ago)')
+                    logger.info(
+                        f'✓ Latest signal: {latest_signal.get("trading_symbol")} ({age.seconds // 60}m ago)'
+                    )
                 except:
                     logger.warning('⚠ Could not parse signal timestamp')
 

@@ -226,7 +226,9 @@ def parse_single_block(text: str, reference_date: Optional[date] = None) -> Dict
                 label = select_expiry_label(underlying=out['underlying'], reference_dt=ref_dt)
 
             out['expiry_label'] = label
-            out['trading_symbol'] = f'{out["underlying"]} {label} {out["strike"]} {out["option_type"]}'
+            out['trading_symbol'] = (
+                f'{out["underlying"]} {label} {out["strike"]} {out["option_type"]}'
+            )
 
         except Exception as e:
             logger.warning(f'Symbol Gen Failed: {e}')

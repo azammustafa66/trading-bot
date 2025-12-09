@@ -22,11 +22,11 @@ def clean_signals():
 
     try:
         shutil.copy2(SIGNALS_FILE, backup_path)
-        logger.info(f'✅ Backup created: {backup_path}')
+        logger.info(f'Backup created: {backup_path}')
 
         with open(SIGNALS_FILE, 'w') as f:
             f.truncate(0)
-        logger.info(f'🧹 {SIGNALS_FILE} wiped clean for tomorrow.')
+        logger.info(f'{SIGNALS_FILE} wiped clean for tomorrow.')
 
         os.remove('cache/dhan_master.csv')
         logger.info('🗑️  Stale CSV cache removed.')

@@ -1,6 +1,6 @@
 [tool.ruff]
 # Set the max line length (same as your autopep8 config)
-line-length = 120
+line-length = 100
 
 [tool.ruff.format]
 # THE SETTING YOU WANT:

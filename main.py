@@ -47,7 +47,9 @@ error_handler.setFormatter(
 )
 
 console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', datefmt='%H:%M:%S'))
+console_handler.setFormatter(
+    logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', datefmt='%H:%M:%S')
+)
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),

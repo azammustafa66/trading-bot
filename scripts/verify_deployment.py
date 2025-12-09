@@ -116,7 +116,9 @@ def run_full_simulation():
         if payload['orderType'] == 'MARKET' and payload['price'] == 0:
             print('✅ Order Type: MARKET @ 0 (Smart Breakout Entry Working)')
         else:
-            errors.append(f'Order Type: Expected MARKET @ 0, got {payload["orderType"]} @ {payload["price"]}')
+            errors.append(
+                f'Order Type: Expected MARKET @ 0, got {payload["orderType"]} @ {payload["price"]}'
+            )
 
         # Check 3: Risk Management & Quantity
         # Risk = 5000 (Positional). Gap = 24050 - 23950 = 100 pts.

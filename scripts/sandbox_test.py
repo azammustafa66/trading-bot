@@ -39,7 +39,10 @@ def run_sandbox():
 
         # Mock LTP to simulate different market conditions
         # Scenario: Entry is 100. We simulate LTP at 101 (Chase Zone).
-        with patch.object(DhanBridge, 'get_ltp', return_value=101.0) as mock_ltp, patch('requests.post') as mock_post:
+        with (
+            patch.object(DhanBridge, 'get_ltp', return_value=101.0) as mock_ltp,
+            patch('requests.post') as mock_post,
+        ):
             # Setup Mock Response for Order
             mock_response = MagicMock()
             mock_response.status_code = 200
