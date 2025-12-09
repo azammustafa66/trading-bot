@@ -63,20 +63,14 @@ class DhanBridge:
 
     def get_ltp(self, security_id: str, exchange_segment: str) -> float | None:
         """
-        Fetches the latest market price using the active session.
+        Fetches the latest market price.
+        Matches API Structure: { "NSE_FNO": [49081] }
         """
         if not self.access_token:
             return None
         try:
             url = f'{self.base_url}/marketfeed/ltp'
-            payload = {
-                'instruments': [
-                    {
-                        'exchangeSegment': exchange_segment,
-                        'securityId': str(security_id),
-                    }
-                ]
-            }
+            payload = {exchange_segment: [str(security_id)]}
 
             response = self.session.post(url, json=payload, timeout=5)
             data = response.json()
@@ -85,12 +79,15 @@ class DhanBridge:
                 logger.error(f'LTP Failed. API Response: {data}')
                 return None
 
-            if data.get('data'):
-                key = f'{exchange_segment}:{security_id}'
-                item = data['data'].get(key)
-                if item:
-                    return float(item.get('last_price', 0))
+            segment_data = data['data'].get(exchange_segment, {})
+            item = segment_data.get(str(security_id))
+
+            if item:
+                return float(item.get('last_price', 0))
+
+            logger.warning(f'LTP not found for {exchange_segment} ID: {security_id}')
             return None
+
         except Exception as e:
             logger.error(f'LTP fetch error: {e}')
             return None

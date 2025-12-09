@@ -44,7 +44,7 @@ logging.basicConfig(
 logger = logging.getLogger('Parser')
 
 MARKET_OPEN_TIME = time(9, 15)
-DEDUPE_WINDOW_MINUTES = int(os.getenv('DEDUPE_WINDOW_MINUTES', '60'))
+DEDUPE_WINDOW_MINUTES = 15
 SIGNALS_JSONL = os.getenv('SIGNALS_JSONL', 'data/signals.jsonl')
 SIGNALS_JSON = os.getenv('SIGNALS_JSON', 'data/signals.json')
 
@@ -110,11 +110,6 @@ def extract_stock_name(text: str) -> Optional[str]:
 def detect_underlying(text: str) -> Optional[str]:
     up = text.upper()
 
-    # STRICT BLOCK: Explicitly ignore unsupported indices
-    if 'FINNIFTY' in up or 'MIDCP' in up or 'MIDCAP' in up:
-        return None
-
-    # 1. Priority: Hardcoded Indices
     if 'BANKNIFTY' in up or 'BANK NIFTY' in up:
         return 'BANKNIFTY'
     if re.search(r'\bNIFTY\b', up):
@@ -131,7 +126,9 @@ def detect_underlying(text: str) -> Optional[str]:
 
 
 def extract_explicit_date(text: str) -> Optional[str]:
-    """Detects if user provided a specific date like '25 DEC'."""
+    """
+    Detects if user provided a specific date like '25 DEC'.
+    """
     match = re.search(
         r'\b(\d{1,2})(?:st|nd|rd|th)?\s*(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)',
         text.upper(),
@@ -144,7 +141,9 @@ def extract_explicit_date(text: str) -> Optional[str]:
 
 
 def is_price_only(text: str) -> bool:
-    """True if text is JUST numbers/prices (Noise)."""
+    """
+    True if text is JUST numbers/prices (Noise).
+    """
     up = text.upper()
     if 'TARGET' in up or 'TGT' in up or 'SL' in up or 'STOP' in up:
         return False
@@ -288,8 +287,6 @@ def process_and_save(
         if not text:
             continue
 
-        # NOTE: IGNORE_KEYWORDS in parse_single_block handles "FUT/FUTURES" check.
-
         is_start_keyword = detect_positional(text)
         has_action = bool(re.search(r'\b(BUY|SELL)\b', text.upper()))
         has_symbol = detect_underlying(text) is not None
@@ -353,6 +350,9 @@ def process_and_save(
                 old_ts = to_ist(old_sig.get('timestamp'))
                 if old_ts and (new_ts - old_ts).total_seconds() < (DEDUPE_WINDOW_MINUTES * 60):
                     is_dupe = True
+                    logger.info(
+                        f'Duplicate detected: {new_sig["trading_symbol"]} (Already processed recently)'
+                    )
                     break
 
         if not is_dupe:
