@@ -3,7 +3,7 @@ import logging
 import os
 import signal
 import sys
-from datetime import datetime
+from datetime import datetime, time  # <--- CHANGED: Added 'time'
 from logging.handlers import RotatingFileHandler
 
 from dotenv import load_dotenv
@@ -11,6 +11,7 @@ from telethon import TelegramClient, events
 
 load_dotenv()
 
+# ... (Logging setup remains the same) ...
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
 MAX_LOG_SIZE = int(os.getenv('MAX_LOG_SIZE_MB', '50')) * 1024 * 1024
 LOG_BACKUP_COUNT = int(os.getenv('LOG_BACKUP_COUNT', '5'))
@@ -85,7 +86,7 @@ TARGET_CHANNELS = [x.strip() for x in RAW_CHANNELS.split(',') if x.strip()]
 
 SIGNALS_JSONL = os.getenv('SIGNALS_JSONL', 'data/signals.jsonl')
 SIGNALS_JSON = os.getenv('SIGNALS_JSON', 'data/signals.json')
-BATCH_DELAY_SECONDS = 1.5
+BATCH_DELAY_SECONDS = 3 * 60
 
 os.makedirs('data', exist_ok=True)
 
@@ -104,6 +105,26 @@ def handle_shutdown_signal(signum, frame):
 # Register signal handlers
 signal.signal(signal.SIGTERM, handle_shutdown_signal)
 signal.signal(signal.SIGINT, handle_shutdown_signal)
+
+
+# --- NEW: MARKET HOURS MONITOR ---
+async def check_market_hours(client: TelegramClient):
+    """Checks every minute if market is closed (3:30 PM IST)."""
+    logger.info('⏰ Market Hours Monitor Started (Auto-Stop at 15:30)')
+
+    stop_time = time(15, 30)  # 3:30 PM
+
+    while True:
+        now = datetime.now()
+
+        # If current time is past 3:30 PM
+        if now.time() >= stop_time:
+            logger.info('🛑 Market Closed (3:30 PM). Stopping Bot...')
+            await client.disconnect() # pyright: ignore[reportGeneralTypeIssues]
+            sys.exit(0)  # Exit with success code
+
+        # Wait 60 seconds before checking again
+        await asyncio.sleep(60)
 
 
 # --- HELPER FUNCTIONS ---
@@ -229,7 +250,7 @@ async def main():
         logger.critical('Missing TARGET_CHANNELS in .env')
         return
 
-    logger.info(f'📋 Configuration loaded')
+    logger.info('Configuration loaded')
     logger.info(f'   - Channels Target: {len(TARGET_CHANNELS)}')
     logger.info(f'   - Log Level: {LOG_LEVEL}')
 
@@ -255,6 +276,10 @@ async def main():
         )
         await client.start()  # pyright: ignore
         logger.info('✅ Connected to Telegram')
+
+        # --- NEW: START MARKET HOURS CHECKER ---
+        asyncio.create_task(check_market_hours(client))
+
     except Exception as e:
         logger.critical(f'Failed to connect to Telegram: {e}', exc_info=True)
         return
@@ -293,7 +318,7 @@ async def main():
             try:
                 chat = await event.get_chat()
                 chat_title = getattr(chat, 'title', getattr(chat, 'username', 'Unknown'))
-            except:
+            except Exception as e:
                 pass
 
             # Preview
@@ -320,6 +345,8 @@ if __name__ == '__main__':
         logger.info('Bot Stopped (Keyboard Interrupt)')
         logger.info(f'Stopped at: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
         logger.info('=' * 60)
+    except SystemExit:
+        pass  # Clean exit for sys.exit(0)
     except Exception as e:
         logger.critical(f'Critical Crash: {e}', exc_info=True)
         sys.exit(1)

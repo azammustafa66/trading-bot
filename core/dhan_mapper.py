@@ -39,7 +39,7 @@ class DhanMapper:
         if self._is_file_fresh():
             return
 
-        logger.info(f'Downloading Dhan Scrip Master...')
+        logger.info('Downloading Dhan Scrip Master...')
         logger.info('This may take a few minutes depending on your connection...')
 
         try:
@@ -101,7 +101,8 @@ class DhanMapper:
 
                 try:
                     lot_size = int(float(df.item(0, 'SEM_LOT_UNITS')))
-                except:
+                except Exception as e:
+                    logger.log(f'{e}')
                     lot_size = 1
 
                 return sec_id, exch, lot_size
