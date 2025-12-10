@@ -5,6 +5,7 @@ cryptg==0.5.2
 cryptography==46.0.3
 dhanhq==2.0.2
 idna==3.11
+isort==7.0.0
 numpy==2.3.5
 pandas==2.3.3
 polars==1.35.2

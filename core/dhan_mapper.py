@@ -39,7 +39,7 @@ class DhanMapper:
         if self._is_file_fresh():
             return
 
-        logger.info(f'Downloading Dhan Scrip Master (~500MB)...')
+        logger.info(f'Downloading Dhan Scrip Master...')
         logger.info('This may take a few minutes depending on your connection...')
 
         try:

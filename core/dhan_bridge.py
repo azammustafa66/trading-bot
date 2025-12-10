@@ -19,11 +19,12 @@ class DhanBridge:
         self.access_token = os.getenv('DHAN_ACCESS_TOKEN')
         self.base_url = 'https://api.dhan.co/v2'
         self.session = requests.Session()
-        self.mapper = DhanMapper()
-        if self.access_token:
+
+        if self.access_token and self.client_id:
             self.session.headers.update(
                 {
                     'access-token': self.access_token,
+                    'client-id': self.client_id,
                     'Content-Type': 'application/json',
                     'Accept': 'application/json',
                 }
@@ -36,6 +37,8 @@ class DhanBridge:
             self.dhan = None
             logger.warning('Running in Mock Mode')
 
+        self.mapper = DhanMapper()
+
     @staticmethod
     def round_to_tick(price: float, tick: float = 0.05) -> float:
         """
@@ -45,16 +48,14 @@ class DhanBridge:
 
     def get_funds(self) -> float | None:
         """
-        Fetches available  funds in trading account
+        Fetches available funds in trading account
         """
         if not self.access_token:
             return None
         try:
             url = f'{self.base_url}/fundlimit'
-
             response = self.session.get(url=url, timeout=10)
             data = response.json()
-
             total_funds = float(data.get('sodLimit', 0.0))
             return total_funds
         except Exception as e:
@@ -63,29 +64,32 @@ class DhanBridge:
 
     def get_ltp(self, security_id: str, exchange_segment: str) -> float | None:
         """
-        Fetches the latest market price.
-        Matches API Structure: { "NSE_FNO": [49081] }
+        Fetches the latest market price using the active session.
+        Matches API Structure: { "NSE_FNO": ["49081"] }
         """
         if not self.access_token:
             return None
         try:
             url = f'{self.base_url}/marketfeed/ltp'
+
+            # Correct Payload: Dictionary keys are segments
             payload = {exchange_segment: [str(security_id)]}
 
-            response = self.session.post(url, json=payload, timeout=5)
+            response = self.session.post(url=url, json=payload, timeout=5)
             data = response.json()
 
             if not data.get('data'):
                 logger.error(f'LTP Failed. API Response: {data}')
                 return None
 
+            # Nested Parsing: Data -> Exchange -> SecurityID -> details
             segment_data = data['data'].get(exchange_segment, {})
             item = segment_data.get(str(security_id))
 
             if item:
                 return float(item.get('last_price', 0))
 
-            logger.warning(f'LTP not found for {exchange_segment} ID: {security_id}')
+            logger.warning(f'LTP key missing for {exchange_segment}:{security_id}')
             return None
 
         except Exception as e:
@@ -113,7 +117,7 @@ class DhanBridge:
             final_qty = int(num_lots * lot_size)
 
             logger.info(
-                f'Qty Calc: Risk ₹{risk_capital} | Gap {sl_gap:.2f} | {num_lots} Lots -> {final_qty}'
+                f'Qty Calc: Risk INR {risk_capital} | Gap {sl_gap:.2f} | {num_lots} Lots -> {final_qty}'
             )
             return final_qty
         except Exception:
@@ -138,6 +142,7 @@ class DhanBridge:
             is_positional = signal.get('is_positional', False)
             entry_price = float(signal.get('trigger_above') or 0)
 
+            # Default to 0 so we can detect missing SL later
             sl_price = float(signal.get('stop_loss') or 0)
 
             # 2. Map Security
@@ -153,11 +158,11 @@ class DhanBridge:
             # 4. LTP Logic, Buffer Check & Order Type
             current_ltp = self.get_ltp(sec_id, exch_seg)
 
-            # Default to LIMIT (Safe assumption if logic flows through)
+            # Default to LIMIT
             order_type = 'LIMIT'
 
             if current_ltp:
-                logger.info(f'🔍 LTP Check: ₹{current_ltp} vs Entry ₹{entry_price}')
+                logger.info(f'LTP Check: {current_ltp} vs Entry {entry_price}')
 
                 # CASE A: Market Order requested explicitly (Entry=0)
                 if entry_price == 0:
@@ -174,7 +179,7 @@ class DhanBridge:
                 # CASE C: Momentum Breakout (LTP >= Entry) - EXECUTE NOW
                 elif current_ltp >= entry_price:
                     logger.info(
-                        f'⚡ Breakout confirmed ({current_ltp} >= {entry_price}). Switching to MARKET.'
+                        f'Breakout confirmed ({current_ltp} >= {entry_price}). Switching to MARKET.'
                     )
                     order_type = 'MARKET'
 
@@ -183,7 +188,6 @@ class DhanBridge:
                     logger.info(f'Price {current_ltp} < {entry_price}. Sending LIMIT order.')
                     order_type = 'LIMIT'
             else:
-                # If LTP fails, WE SHOULD SKIP to avoid buying at 5% gap blindly
                 logger.error('Could not fetch LTP. Skipping trade for safety.')
                 return
 
@@ -206,6 +210,14 @@ class DhanBridge:
 
                 # Safety fallback
                 sl_price = max(sl_price, 0.05)
+
+            # Ensure SL is strictly below Entry for BUY orders
+            if action == 'BUY' and sl_price >= entry_price:
+                adjusted_sl = entry_price - 1.0
+                logger.warning(
+                    f'SL ({sl_price}) >= Entry ({entry_price}). Adjusting SL to {adjusted_sl}'
+                )
+                sl_price = max(adjusted_sl, 0.05)
 
             # 6. Price Calculations & Rounding
             target_price = entry_price * 10.0
