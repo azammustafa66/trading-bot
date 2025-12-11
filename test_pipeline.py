@@ -50,8 +50,12 @@ class MockSession:
             sec_id = json['instruments'][0]['securityId']  # pyright: ignore[reportOptionalSubscript]
             exch = json['instruments'][0]['exchangeSegment']  # pyright: ignore[reportOptionalSubscript]
             fake_ltp = 155.05
-            logger.info(f'🔮 [MOCK API] Fetching LTP for {exch}:{sec_id}... Returning {fake_ltp}')
-            return MockResponse({'data': {f'{exch}:{sec_id}': {'last_price': fake_ltp}}})
+            logger.info(
+                f'🔮 [MOCK API] Fetching LTP for {exch}:{sec_id}... Returning {fake_ltp}'
+            )
+            return MockResponse(
+                {'data': {f'{exch}:{sec_id}': {'last_price': fake_ltp}}}
+            )
 
         # B. Intercept Order Calls
         if 'orders' in url:
@@ -61,7 +65,9 @@ class MockSession:
             print(f'   Exchange   : {json.get("exchangeSegment")}')  # type: ignore
             print(f'📤 PAYLOAD:\n{json.dumps(json, indent=2)}')  # pyright: ignore[reportOptionalMemberAccess]
             print('=' * 60 + '\n')
-            return MockResponse({'orderStatus': 'PENDING', 'orderId': 'TEST-ORDER-123'})
+            return MockResponse(
+                {'orderStatus': 'PENDING', 'orderId': 'TEST-ORDER-123'}
+            )
 
         return MockResponse({})
 
@@ -121,11 +127,15 @@ def run_mega_test():
         if sec_id and lot != -1:
             print(f'      🎉 SUCCESS: Security ID Found!')
             print(f'      🆔 ID      : {sec_id}')
-            print(f'      🏛️ Exchange: {exch} (Should be NSE for Stocks, BSE for Sensex)')
+            print(
+                f'      🏛️ Exchange: {exch} (Should be NSE for Stocks, BSE for Sensex)'
+            )
             print(f'      📦 Lot Size: {lot}')
         else:
             print(f'      ❌ FAILURE: Security ID NOT FOUND in CSV.')
-            print('      💡 Tip: Check if CSV is downloaded and dates match active contracts.')
+            print(
+                '      💡 Tip: Check if CSV is downloaded and dates match active contracts.'
+            )
             continue  # Stop if mapping fails
 
         # --- STEP 3: EXECUTE (MOCKED) ---

@@ -98,21 +98,33 @@ def run_sandbox():
 
             # Check 1: Did it switch to MARKET because LTP (101) > Entry (100)?
             if payload['orderType'] == 'MARKET':
-                print('✅ Logic Check: Order converted to MARKET (Chase Zone) - PASSED')
+                print(
+                    '✅ Logic Check: Order converted to MARKET (Chase Zone) - PASSED'
+                )
             else:
-                print(f'❌ Logic Check: Expected MARKET, got {payload["orderType"]} - FAILED')
+                print(
+                    f'❌ Logic Check: Expected MARKET, got {payload["orderType"]} - FAILED'
+                )
 
             # Check 2: Is Price 0 for Market Order?
             if payload['price'] == 0:
-                print('✅ Logic Check: Price set to 0 for Market Order - PASSED')
+                print(
+                    '✅ Logic Check: Price set to 0 for Market Order - PASSED'
+                )
             else:
-                print(f'❌ Logic Check: Price is {payload["price"]}, expected 0 - FAILED')
+                print(
+                    f'❌ Logic Check: Price is {payload["price"]}, expected 0 - FAILED'
+                )
 
             # Check 3: Positional Flag
             if payload['productType'] == 'MARGIN':
-                print('✅ Logic Check: Product set to MARGIN (Positional) - PASSED')
+                print(
+                    '✅ Logic Check: Product set to MARGIN (Positional) - PASSED'
+                )
             else:
-                print(f'❌ Logic Check: Expected MARGIN, got {payload["productType"]} - FAILED')
+                print(
+                    f'❌ Logic Check: Expected MARGIN, got {payload["productType"]} - FAILED'
+                )
 
             # Check 4: Quantity Calculation
             # Risk 5000 (Positional). Gap = 100-80 = 20.
@@ -121,9 +133,13 @@ def run_sandbox():
             # 250 / 75 = 3.33 -> Rounds to 3 lots -> 225 Qty.
             expected_qty = 225
             if payload['quantity'] == expected_qty:
-                print(f'✅ Math Check: Qty {payload["quantity"]} is correct (3 Lots) - PASSED')
+                print(
+                    f'✅ Math Check: Qty {payload["quantity"]} is correct (3 Lots) - PASSED'
+                )
             else:
-                print(f'❌ Math Check: Expected {expected_qty}, got {payload["quantity"]} - FAILED')
+                print(
+                    f'❌ Math Check: Expected {expected_qty}, got {payload["quantity"]} - FAILED'
+                )
 
     print('\n🎉 SANDBOX TEST COMPLETE')
 

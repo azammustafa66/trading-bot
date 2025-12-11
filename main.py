@@ -3,7 +3,7 @@ import logging
 import os
 import signal
 import sys
-from datetime import datetime, time  # <--- CHANGED: Added 'time'
+from datetime import datetime, time
 from logging.handlers import RotatingFileHandler
 
 from dotenv import load_dotenv
@@ -49,7 +49,9 @@ error_handler.setFormatter(
 
 console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setFormatter(
-    logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', datefmt='%H:%M:%S')
+    logging.Formatter(
+        '%(asctime)s [%(levelname)s] %(message)s', datefmt='%H:%M:%S'
+    )
 )
 
 logging.basicConfig(
@@ -64,7 +66,9 @@ def handle_uncaught_exception(exc_type, exc_value, exc_traceback):
     if issubclass(exc_type, KeyboardInterrupt):
         sys.__excepthook__(exc_type, exc_value, exc_traceback)
         return
-    logger.critical('Uncaught exception:', exc_info=(exc_type, exc_value, exc_traceback))
+    logger.critical(
+        'Uncaught exception:', exc_info=(exc_type, exc_value, exc_traceback)
+    )
 
 
 sys.excepthook = handle_uncaught_exception
@@ -73,7 +77,9 @@ try:
     from core.dhan_bridge import DhanBridge
     from core.signal_parser import process_and_save
 except ImportError as e:
-    logger.critical(f'Import Error: {e}. Ensure you are running from the root directory.')
+    logger.critical(
+        f'Import Error: {e}. Ensure you are running from the root directory.'
+    )
     sys.exit(1)
 
 # --- CONFIGURATION ---
@@ -86,7 +92,7 @@ TARGET_CHANNELS = [x.strip() for x in RAW_CHANNELS.split(',') if x.strip()]
 
 SIGNALS_JSONL = os.getenv('SIGNALS_JSONL', 'data/signals.jsonl')
 SIGNALS_JSON = os.getenv('SIGNALS_JSON', 'data/signals.json')
-BATCH_DELAY_SECONDS = 3 * 60
+BATCH_DELAY_SECONDS = 5
 
 os.makedirs('data', exist_ok=True)
 
@@ -120,7 +126,7 @@ async def check_market_hours(client: TelegramClient):
         # If current time is past 3:30 PM
         if now.time() >= stop_time:
             logger.info('🛑 Market Closed (3:30 PM). Stopping Bot...')
-            await client.disconnect() # pyright: ignore[reportGeneralTypeIssues]
+            await client.disconnect()  # pyright: ignore[reportGeneralTypeIssues]
             sys.exit(0)  # Exit with success code
 
         # Wait 60 seconds before checking again
@@ -186,7 +192,9 @@ class SignalBatcher:
         try:
             await asyncio.sleep(BATCH_DELAY_SECONDS)
 
-            logger.info(f'⚡ Processing batch of {len(self.batch_messages)} messages...')
+            logger.info(
+                f'⚡ Processing batch of {len(self.batch_messages)} messages...'
+            )
 
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(f'Batch content: {self.batch_messages}')
@@ -199,7 +207,9 @@ class SignalBatcher:
                     jsonl_path=SIGNALS_JSONL,
                     json_path=SIGNALS_JSON,
                 )
-                logger.debug(f'Parser returned {len(results) if results else 0} signals')
+                logger.debug(
+                    f'Parser returned {len(results) if results else 0} signals'
+                )
             except Exception as e:
                 logger.error(f'❌ Signal parsing failed: {e}', exc_info=True)
                 results = []
@@ -292,7 +302,9 @@ async def main():
         try:
             entity = await resolve_channel(client, target)
             resolved_chats.append(entity)
-            logger.info(f'Added listener for: {getattr(entity, "title", target)}')
+            logger.info(
+                f'Added listener for: {getattr(entity, "title", target)}'
+            )
         except Exception as e:
             logger.error(f"   Failed to resolve '{target}': {e}")
             logger.error('    Check permissions or channel name spelling.')
@@ -317,7 +329,9 @@ async def main():
             chat_title = 'Unknown'
             try:
                 chat = await event.get_chat()
-                chat_title = getattr(chat, 'title', getattr(chat, 'username', 'Unknown'))
+                chat_title = getattr(
+                    chat, 'title', getattr(chat, 'username', 'Unknown')
+                )
             except Exception as e:
                 pass
 
@@ -343,7 +357,9 @@ if __name__ == '__main__':
     except KeyboardInterrupt:
         logger.info('=' * 60)
         logger.info('Bot Stopped (Keyboard Interrupt)')
-        logger.info(f'Stopped at: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
+        logger.info(
+            f'Stopped at: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
+        )
         logger.info('=' * 60)
     except SystemExit:
         pass  # Clean exit for sys.exit(0)

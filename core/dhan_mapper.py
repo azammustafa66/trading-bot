@@ -40,7 +40,9 @@ class DhanMapper:
             return
 
         logger.info('Downloading Dhan Scrip Master...')
-        logger.info('This may take a few minutes depending on your connection...')
+        logger.info(
+            'This may take a few minutes depending on your connection...'
+        )
 
         try:
             with requests.get(self.url, stream=True, timeout=60) as r:
@@ -58,7 +60,9 @@ class DhanMapper:
             logger.error(f'Download failed: {e}')
             raise
         except Exception as e:
-            logger.error(f'Unexpected error during download: {e}', exc_info=True)
+            logger.error(
+                f'Unexpected error during download: {e}', exc_info=True
+            )
             raise
 
     def get_security_id(self, trading_symbol):
@@ -102,12 +106,14 @@ class DhanMapper:
                 try:
                     lot_size = int(float(df.item(0, 'SEM_LOT_UNITS')))
                 except Exception as e:
-                    logger.log(f'{e}')
+                    logger.info(f'{e}')
                     lot_size = 1
 
                 return sec_id, exch, lot_size
 
-            logger.warning(f'ID Not Found for: {trading_symbol} (Checked NSE Only for Stocks)')
+            logger.warning(
+                f'ID Not Found for: {trading_symbol} (Checked NSE Only for Stocks)'
+            )
             return '', '', -1
 
         except Exception as e:

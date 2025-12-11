@@ -39,7 +39,11 @@ class BotHealthMonitor:
                 return True
 
             # Check for systemd service
-            result = os.popen('systemctl is-active trading-bot 2>/dev/null').read().strip()
+            result = (
+                os.popen('systemctl is-active trading-bot 2>/dev/null')
+                .read()
+                .strip()
+            )
             if result == 'active':
                 logger.info('✓ Bot process is running (systemd service)')
                 return True
@@ -62,16 +66,22 @@ class BotHealthMonitor:
             mtime = datetime.fromtimestamp(self.trade_log.stat().st_mtime)
             age = datetime.now() - mtime
             if age > timedelta(minutes=5):
-                issues.append(f"Main log hasn't been updated in {age.seconds // 60} minutes")
+                issues.append(
+                    f"Main log hasn't been updated in {age.seconds // 60} minutes"
+                )
             else:
-                logger.info(f'✓ Main log is active (last update: {age.seconds}s ago)')
+                logger.info(
+                    f'✓ Main log is active (last update: {age.seconds}s ago)'
+                )
 
         # Check error log
         if self.error_log.exists():
             # Count recent errors
             error_count = self._count_recent_errors()
             if error_count > 10:
-                issues.append(f'High error count: {error_count} errors in last hour')
+                issues.append(
+                    f'High error count: {error_count} errors in last hour'
+                )
             elif error_count > 0:
                 logger.warning(f'⚠ {error_count} errors in last hour')
             else:
@@ -104,7 +114,9 @@ class BotHealthMonitor:
                     try:
                         # Parse timestamp from log line
                         timestamp_str = line.split('[')[0].strip()
-                        timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
+                        timestamp = datetime.strptime(
+                            timestamp_str, '%Y-%m-%d %H:%M:%S'
+                        )
                         if timestamp > cutoff:
                             error_count += 1
                     except:
@@ -118,7 +130,9 @@ class BotHealthMonitor:
     def check_signal_processing(self):
         """Check if signals are being processed"""
         if not self.signals_file.exists():
-            logger.warning('⚠ No signals file found (this is normal if bot just started)')
+            logger.warning(
+                '⚠ No signals file found (this is normal if bot just started)'
+            )
             return True
 
         try:
@@ -135,7 +149,9 @@ class BotHealthMonitor:
             if timestamp_str:
                 # Parse timestamp
                 try:
-                    timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                    timestamp = datetime.fromisoformat(
+                        timestamp_str.replace('Z', '+00:00')
+                    )
                     # Remove timezone for comparison
                     if timestamp.tzinfo:
                         timestamp = timestamp.replace(tzinfo=None)
@@ -165,7 +181,9 @@ class BotHealthMonitor:
                 logger.error(f'✗ Low disk space: {free_gb:.2f} GB free')
                 return False
             elif free_gb < 5:
-                logger.warning(f'⚠ Disk space getting low: {free_gb:.2f} GB free')
+                logger.warning(
+                    f'⚠ Disk space getting low: {free_gb:.2f} GB free'
+                )
             else:
                 logger.info(f'✓ Disk space: {free_gb:.1f} GB free')
 
@@ -192,7 +210,9 @@ class BotHealthMonitor:
         age = datetime.now() - mtime
 
         if age > timedelta(days=1):
-            logger.warning(f'⚠ Dhan CSV is {age.days} days old (should refresh daily)')
+            logger.warning(
+                f'⚠ Dhan CSV is {age.days} days old (should refresh daily)'
+            )
         else:
             logger.info('✓ Dhan CSV is up to date')
 

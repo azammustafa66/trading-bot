@@ -22,7 +22,9 @@ try:
     from core.signal_parser import process_and_save
 except ImportError as e:
     print(f'❌ IMPORT ERROR: {e}')
-    print("👉 Did you run the 'mkdir' and 'mv' commands to organize 'core/' and 'utils/'?")
+    print(
+        "👉 Did you run the 'mkdir' and 'mv' commands to organize 'core/' and 'utils/'?"
+    )
     sys.exit(1)
 
 # Setup Logging
@@ -109,7 +111,9 @@ def run_full_simulation():
         if payload['productType'] == 'MARGIN':
             print('✅ Product Type: MARGIN (Correct for Positional)')
         else:
-            errors.append(f'Product Type: Expected MARGIN, got {payload["productType"]}')
+            errors.append(
+                f'Product Type: Expected MARGIN, got {payload["productType"]}'
+            )
 
         # Check 2: Smart Entry Logic
         # LTP (24100) > Entry (24050). Should be Market Order.
@@ -126,7 +130,9 @@ def run_full_simulation():
         # Lot Size = 75.
         # 50/75 = 0.66 -> Round to nearest Lot -> 1 Lot (75).
         if payload['quantity'] == 75:
-            print(f'✅ Quantity: {payload["quantity"]} (Correctly calculated 1 Lot from Risk)')
+            print(
+                f'✅ Quantity: {payload["quantity"]} (Correctly calculated 1 Lot from Risk)'
+            )
         else:
             errors.append(f'Quantity: Expected 75, got {payload["quantity"]}')
 

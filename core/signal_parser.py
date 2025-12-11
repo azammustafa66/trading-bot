@@ -6,25 +6,35 @@ import os
 import re
 import sys
 from datetime import date, datetime, time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 
 # --- 1. Robust Import Setup ---
 try:
-    from utils.generate_expiry_dates import (select_expiry_date,
-                                             select_expiry_label)
+    from utils.generate_expiry_dates import (
+        select_expiry_date,
+        select_expiry_label,
+    )
 except ImportError:
     try:
-        sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        from utils.generate_expiry_dates import (select_expiry_date,
-                                                 select_expiry_label)
+        sys.path.append(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
+        from utils.generate_expiry_dates import (
+            select_expiry_date,
+            select_expiry_label,
+        )
     except ImportError:
         # Fallback dummy functions
-        def select_expiry_date(underlying: str, reference_dt: Optional[datetime] = None) -> date:
+        def select_expiry_date(
+            underlying: str, reference_dt: Optional[datetime] = None
+        ) -> date:
             return date.today()
 
-        def select_expiry_label(underlying: str, reference_dt: Optional[datetime] = None) -> str:
+        def select_expiry_label(
+            underlying: str, reference_dt: Optional[datetime] = None
+        ) -> str:
             return 'TEST-EXPIRY'
 
 
@@ -93,7 +103,9 @@ def now_ist() -> datetime:
 
 
 def detect_positional(text: str) -> bool:
-    return bool(re.search(r'POSITIONAL|POSTIONAL|POSITION|LONG TERM|HOLD', text.upper()))
+    return bool(
+        re.search(r'POSITIONAL|POSTIONAL|POSITION|LONG TERM|HOLD', text.upper())
+    )
 
 
 def extract_stock_name(text: str) -> Optional[str]:
@@ -155,7 +167,9 @@ def is_price_only(text: str) -> bool:
     return all(re.fullmatch(r'[\d\.\-\s]+', ln) for ln in lines)
 
 
-def parse_single_block(text: str, reference_date: Optional[date] = None) -> Dict[str, Any]:
+def parse_single_block(
+    text: str, reference_date: Optional[date] = None
+) -> Dict[str, Any]:
     clean_text = text.strip().upper()
 
     out: Dict[str, Any] = {
@@ -173,7 +187,11 @@ def parse_single_block(text: str, reference_date: Optional[date] = None) -> Dict
     }
 
     # 1. Fast Fail Filters
-    if not clean_text or is_price_only(clean_text) or any(k in clean_text for k in IGNORE_KEYWORDS):
+    if (
+        not clean_text
+        or is_price_only(clean_text)
+        or any(k in clean_text for k in IGNORE_KEYWORDS)
+    ):
         out['ignore'] = True
         return out
 
@@ -191,7 +209,9 @@ def parse_single_block(text: str, reference_date: Optional[date] = None) -> Dict
     out['underlying'] = detect_underlying(text)
 
     # 5. Extract Strike + Option Type
-    strike_match = re.search(r'\b(\d{4,6}|\d{2,5}(?:\.\d+)?)\s*(CE|PE|C|P|CALL|PUT)?\b', clean_text)
+    strike_match = re.search(
+        r'\b(\d{4,6}|\d{2,5}(?:\.\d+)?)\s*(CE|PE|C|P|CALL|PUT)?\b', clean_text
+    )
     if strike_match:
         raw_strike = strike_match.group(1)
         if '.' in raw_strike:
@@ -211,7 +231,9 @@ def parse_single_block(text: str, reference_date: Optional[date] = None) -> Dict
         out['trigger_above'] = float(trigger_match.group(1))
 
     # 7. Extract SL (FIXED WITH \b)
-    sl_match = re.search(r'\b(?:SL|STOP\s*LOSS)[\s:\-]*(\d+(?:\.\d+)?)', clean_text)
+    sl_match = re.search(
+        r'\b(?:SL|STOP\s*LOSS)[\s:\-]*(\d+(?:\.\d+)?)', clean_text
+    )
     if sl_match:
         out['stop_loss'] = float(sl_match.group(1))
 
@@ -224,7 +246,9 @@ def parse_single_block(text: str, reference_date: Optional[date] = None) -> Dict
             else:
                 ref_d = reference_date or date.today()
                 ref_dt = datetime.combine(ref_d, time(9, 15))
-                label = select_expiry_label(underlying=out['underlying'], reference_dt=ref_dt)
+                label = select_expiry_label(
+                    underlying=out['underlying'], reference_dt=ref_dt
+                )
 
             out['expiry_label'] = label
             out['trading_symbol'] = (
@@ -301,7 +325,9 @@ def process_and_save(
 
         current_ts = to_ist(dt)
         last_ts = to_ist(buffer_dates[-1]) if buffer_dates else current_ts
-        is_stale = (current_ts and last_ts) and (current_ts - last_ts).total_seconds() > 300
+        is_stale = (current_ts and last_ts) and (
+            current_ts - last_ts
+        ).total_seconds() > 300
 
         should_flush = False
 
@@ -310,7 +336,11 @@ def process_and_save(
         elif is_stale:
             should_flush = True
         elif is_strong_new:
-            if buffer.strip().upper() in ['POSITIONAL', 'RISKY', 'POSITIONAL RISKY']:
+            if buffer.strip().upper() in [
+                'POSITIONAL',
+                'RISKY',
+                'POSITIONAL RISKY',
+            ]:
                 should_flush = False
             else:
                 should_flush = True
@@ -335,8 +365,8 @@ def process_and_save(
         try:
             with open(jsonl_path, 'r') as f:
                 existing = [json.loads(line) for line in f if line.strip()]
-        except:
-            pass
+        except Exception as e:
+            logger.info(msg=f'Failed to read existing signals: {e}')
 
     for new_sig in parsed_signals:
         is_dupe = False
@@ -350,7 +380,9 @@ def process_and_save(
                 and old_sig.get('action') == new_sig['action']
             ):
                 old_ts = to_ist(old_sig.get('timestamp'))
-                if old_ts and (new_ts - old_ts).total_seconds() < (DEDUPE_WINDOW_MINUTES * 60):
+                if old_ts and (new_ts - old_ts).total_seconds() < (
+                    DEDUPE_WINDOW_MINUTES * 60
+                ):
                     is_dupe = True
                     logger.info(
                         f'Duplicate detected: {new_sig["trading_symbol"]} (Already processed recently)'
@@ -444,7 +476,11 @@ if __name__ == '__main__':
     print('-' * 65)
 
     for r in results:
-        trig = str(r['trigger_above']) if r['trigger_above'] is not None else '---'
+        trig = (
+            str(r['trigger_above']) if r['trigger_above'] is not None else '---'
+        )
         sl = str(r['stop_loss']) if r['stop_loss'] is not None else '---'
         pos = 'YES' if r['is_positional'] else 'NO'
-        print(f'{r["trading_symbol"]:<35} | {r["action"]:<5} | {trig:<5} | {sl:<5} | {pos}')
+        print(
+            f'{r["trading_symbol"]:<35} | {r["action"]:<5} | {trig:<5} | {sl:<5} | {pos}'
+        )

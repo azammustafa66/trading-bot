@@ -89,7 +89,9 @@ class DhanBridge:
             if item:
                 return float(item.get('last_price', 0))
 
-            logger.warning(f'LTP key missing for {exchange_segment}:{security_id}')
+            logger.warning(
+                f'LTP key missing for {exchange_segment}:{security_id}'
+            )
             return None
 
         except Exception as e:
@@ -97,7 +99,11 @@ class DhanBridge:
             return None
 
     def calculate_quantity(
-        self, entry_price: float, sl_price: float, is_positional: bool, lot_size: int
+        self,
+        entry_price: float,
+        sl_price: float,
+        is_positional: bool,
+        lot_size: int,
     ) -> int:
         """
         Calculates position size based on defined risk per trade.
@@ -105,7 +111,9 @@ class DhanBridge:
         try:
             available_funds = self.get_funds()
             total_funds = available_funds if available_funds is not None else 0
-            risk_capital = total_funds * 0.02 if is_positional else total_funds * 0.0125
+            risk_capital = (
+                total_funds * 0.02 if is_positional else total_funds * 0.0125
+            )
 
             sl_gap = abs(entry_price - sl_price)
             if sl_gap < 1.0:
@@ -153,7 +161,11 @@ class DhanBridge:
                 return
 
             # 3. Determine Exchange Segment
-            exch_seg = 'BSE_FNO' if (exch_id == 'BSE' or sym == 'SENSEX') else 'NSE_FNO'
+            exch_seg = (
+                'BSE_FNO'
+                if (exch_id == 'BSE' or sym == 'SENSEX')
+                else 'NSE_FNO'
+            )
 
             # 4. LTP Logic, Buffer Check & Order Type
             current_ltp = self.get_ltp(sec_id, exch_seg)
@@ -185,7 +197,9 @@ class DhanBridge:
 
                 # CASE D: Price is below Entry
                 else:
-                    logger.info(f'Price {current_ltp} < {entry_price}. Sending LIMIT order.')
+                    logger.info(
+                        f'Price {current_ltp} < {entry_price}. Sending LIMIT order.'
+                    )
                     order_type = 'LIMIT'
             else:
                 logger.error('Could not fetch LTP. Skipping trade for safety.')
@@ -199,14 +213,21 @@ class DhanBridge:
             # Logic: If SL is missing (0), apply rules
             if sl_price == 0 and anchor_price > 0:
                 raw_text = signal.get('raw', '').upper()
-                hero_keywords = {'HERO ZERO', 'HEROZERO', 'ZERO HERO', 'ZEROHERO'}
+                hero_keywords = {
+                    'HERO ZERO',
+                    'HEROZERO',
+                    'ZERO HERO',
+                    'ZEROHERO',
+                }
 
                 if any(k in raw_text for k in hero_keywords):
                     sl_price = 0.05
                     logger.info('Hero Zero Detected: SL set to 0.05')
                 else:
                     sl_price = anchor_price - 15.0  # 15 pt buffer
-                    logger.info(f'SL Missing. Applying Auto-SL: {anchor_price} - 15 = {sl_price}')
+                    logger.info(
+                        f'SL Missing. Applying Auto-SL: {anchor_price} - 15 = {sl_price}'
+                    )
 
                 # Safety fallback
                 sl_price = max(sl_price, 0.05)
@@ -222,13 +243,19 @@ class DhanBridge:
             # 6. Price Calculations & Rounding
             target_price = entry_price * 10.0
 
-            price_to_send = self.round_to_tick(entry_price + 0.5) if order_type == 'LIMIT' else 0
+            price_to_send = (
+                self.round_to_tick(entry_price + 0.5)
+                if order_type == 'LIMIT'
+                else 0
+            )
 
             target_price = self.round_to_tick(target_price)
             sl_price = self.round_to_tick(sl_price)
             trailing_jump = self.round_to_tick(entry_price * 0.05)
 
-            qty = self.calculate_quantity(entry_price, sl_price, is_positional, lot_size)
+            qty = self.calculate_quantity(
+                entry_price, sl_price, is_positional, lot_size
+            )
             product_type = 'MARGIN' if is_positional else 'INTRADAY'
 
             # 7. Payload
@@ -256,7 +283,9 @@ class DhanBridge:
             response = self.session.post(url, json=payload, timeout=10)
             data = response.json()
 
-            if response.status_code in [200, 201] and data.get('orderStatus') in [
+            if response.status_code in [200, 201] and data.get(
+                'orderStatus'
+            ) in [
                 'PENDING',
                 'TRADED',
                 'TRANSIT',
