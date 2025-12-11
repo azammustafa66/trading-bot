@@ -21,6 +21,7 @@ class DhanBridge:
         self.base_url = 'https://api.dhan.co/v2'
         self.session = requests.Session()
 
+        # FIX: Add headers including client-id for LTP calls
         if self.access_token and self.client_id:
             self.session.headers.update(
                 {
@@ -66,32 +67,36 @@ class DhanBridge:
     def get_ltp(self, security_id: str, exchange_segment: str) -> float | None:
         """
         Fetches the latest market price using the active session.
+        Matches API Structure: { "NSE_FNO": [49081] } (Int in List)
         """
         if not self.access_token:
-            logger.warning('No access token, cannot fetch LTP')
             return None
         try:
             url = f'{self.base_url}/marketfeed/ltp'
 
+            # Payload must be INTEGER for ID
             payload = {exchange_segment: [int(security_id)]}
 
-            response = self.session.post(url=url, json=payload, timeout=5)
+            # Fallback for BSE Options (Try both BSE_FNO and BSE)
+            if exchange_segment == 'BSE_FNO':
+                payload['BSE'] = [int(security_id)]
+
+            response = self.session.post(url, json=payload, timeout=5)
             data = response.json()
 
             if not data.get('data'):
                 logger.error(f'LTP Failed. API Response: {data}')
                 return None
 
-            segment_data = data['data'].get(exchange_segment, {})
-            item = segment_data.get(str(security_id))
+            # Check all returned segments for the ID (String key in response)
+            str_id = str(security_id)
+            for seg, items in data['data'].items():
+                if str_id in items:
+                    price = float(items[str_id].get('last_price', 0))
+                    if price > 0:
+                        return price
 
-            if item:
-                return float(item.get('last_price', 0))
-
-            # Debugging fallback
             logger.warning(f'LTP key missing for {exchange_segment}:{security_id}')
-            # logger.debug(f'   Payload Sent: {payload}')
-            # logger.debug(f'   Keys Received: {list(segment_data.keys())[:5]}...')
             return None
 
         except Exception as e:
@@ -133,7 +138,7 @@ class DhanBridge:
 
     def execute_super_order(self, signal: Dict[str, Any]):
         """
-        Executes Super Order (LIMIT/MARKET only) with 5% Buffer Safety.
+        Executes Super Order (LIMIT/MARKET) with Trigger Price for Limit orders.
         """
         if not self.dhan:
             logger.warning('Dhan client not initialized, order skipped')
@@ -163,10 +168,8 @@ class DhanBridge:
             # 3. Determine Exchange Segment
             exch_seg = 'BSE_FNO' if (exch_id == 'BSE' or sym == 'SENSEX') else 'NSE_FNO'
 
-            # 4. LTP Logic, Buffer Check & Order Type
+            # 4. LTP Logic & Order Type
             current_ltp = self.get_ltp(sec_id, exch_seg)
-
-            # Default to LIMIT
             order_type = 'LIMIT'
 
             if current_ltp:
@@ -180,7 +183,7 @@ class DhanBridge:
                 # CASE B: Price is TOO HIGH (> 5% buffer) - SKIP TRADE
                 elif current_ltp > (entry_price * 1.05):
                     logger.warning(
-                        f'Price {current_ltp} is > 5% above entry {entry_price}. SKIPPING trade to avoid FOMO.'
+                        f'Price {current_ltp} is > 5% above entry {entry_price}. SKIPPING trade.'
                     )
                     return
 
@@ -191,10 +194,10 @@ class DhanBridge:
                     )
                     order_type = 'MARKET'
 
-                # CASE D: Price is below Entry
+                # CASE D: Price is below Entry - PLACE LIMIT
                 else:
                     logger.info(
-                        f'Price {current_ltp} < {entry_price}. Sending LIMIT order.'
+                        f'Price {current_ltp} < {entry_price}. Sending LIMIT order with Trigger.'
                     )
                     order_type = 'LIMIT'
             else:
@@ -206,46 +209,39 @@ class DhanBridge:
             if anchor_price == 0 and current_ltp:
                 anchor_price = current_ltp
 
-            # Logic: If SL is missing (0), apply rules
             if sl_price == 0 and anchor_price > 0:
                 raw_text = signal.get('raw', '').upper()
-                hero_keywords = {
-                    'HERO ZERO',
-                    'HEROZERO',
-                    'ZERO HERO',
-                    'ZEROHERO',
-                }
+                hero_keywords = {'HERO ZERO', 'HEROZERO', 'ZERO HERO', 'ZEROHERO'}
 
                 if any(k in raw_text for k in hero_keywords):
                     sl_price = 0.05
                     logger.info('Hero Zero Detected: SL set to 0.05')
                 else:
-                    sl_price = anchor_price - 15.0  # 15 pt buffer
-                    logger.info(
-                        f'SL Missing. Applying Auto-SL: {anchor_price} - 15 = {sl_price}'
-                    )
+                    sl_price = anchor_price - 15.0
+                    logger.info(f'SL Missing. Applying Auto-SL: {sl_price}')
 
-                # Safety fallback
                 sl_price = max(sl_price, 0.05)
 
             # Ensure SL is strictly below Entry for BUY orders
             if action == 'BUY' and sl_price >= entry_price:
                 adjusted_sl = entry_price - 1.0
-                logger.warning(
-                    f'SL ({sl_price}) >= Entry ({entry_price}). Adjusting SL to {adjusted_sl}'
-                )
+                logger.warning(f'SL ({sl_price}) >= Entry. Adjusting to {adjusted_sl}')
                 sl_price = max(adjusted_sl, 0.05)
 
-            # 6. Price Calculations & Rounding
-            target_price = entry_price * 10.0
-
-            price_to_send = (
-                self.round_to_tick(entry_price + 0.5) if order_type == 'LIMIT' else 0
-            )
-
-            target_price = self.round_to_tick(target_price)
+            # 6. Price Calculations
+            target_price = self.round_to_tick(entry_price * 10.0)
             sl_price = self.round_to_tick(sl_price)
             trailing_jump = self.round_to_tick(entry_price * 0.05)
+
+            # --- TRIGGER PRICE LOGIC ---
+            # If LIMIT: Trigger = Entry (80), Price = Entry + 0.5 (80.5)
+            # If MARKET: Trigger = 0, Price = 0
+            if order_type == 'LIMIT':
+                trigger_price = self.round_to_tick(entry_price)
+                price_to_send = self.round_to_tick(entry_price + 0.5)
+            else:
+                trigger_price = 0.0
+                price_to_send = 0.0
 
             qty = self.calculate_quantity(entry_price, sl_price, is_positional, lot_size)
             product_type = 'MARGIN' if is_positional else 'INTRADAY'
@@ -261,6 +257,7 @@ class DhanBridge:
                 'securityId': str(sec_id),
                 'quantity': int(qty),
                 'price': float(price_to_send),
+                'triggerPrice': float(trigger_price),
                 'validity': 'DAY',
                 'targetPrice': float(target_price),
                 'stopLossPrice': float(sl_price),

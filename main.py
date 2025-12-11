@@ -123,8 +123,8 @@ async def check_market_hours(client: TelegramClient):
         # If current time is past 3:30 PM
         if now.time() >= stop_time:
             logger.info('🛑 Market Closed (3:30 PM). Stopping Bot...')
-            await client.disconnect() # pyright: ignore[reportGeneralTypeIssues]
-            sys.exit(0)  # Exit with success code
+            await client.disconnect()  # pyright: ignore[reportGeneralTypeIssues]
+            return
 
         # Wait 60 seconds before checking again
         await asyncio.sleep(60)
@@ -278,7 +278,7 @@ async def main():
             api_hash=TELEGRAM_API_HASH,
         )
         await client.start()  # pyright: ignore
-        logger.info('✅ Connected to Telegram')
+        logger.info('Connected to Telegram')
 
         # --- START MARKET HOURS CHECKER ---
         asyncio.create_task(check_market_hours(client))
@@ -349,8 +349,8 @@ async def main():
                     try:
                         with open('logs/trade_logs.log', 'r') as f:
                             lines = f.readlines()
-                            last_lines = ''.join(lines[-15:])
-                        await event.reply(f'**Last 15 Lines:**\n```{last_lines}```')
+                            last_lines = ''.join(lines[-30:])
+                        await event.reply(f'**Last 30 Lines:**\n```{last_lines}```')
                     except Exception as e:
                         await event.reply(f'❌ Error: {e}')
 

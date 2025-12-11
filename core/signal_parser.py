@@ -12,11 +12,13 @@ from dotenv import load_dotenv
 
 # --- 1. Robust Import Setup ---
 try:
-    from utils.generate_expiry_dates import select_expiry_date, select_expiry_label
+    from utils.generate_expiry_dates import (select_expiry_date,
+                                             select_expiry_label)
 except ImportError:
     try:
         sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        from utils.generate_expiry_dates import select_expiry_date, select_expiry_label
+        from utils.generate_expiry_dates import (select_expiry_date,
+                                                 select_expiry_label)
     except ImportError:
         # Fallback dummy functions
         def select_expiry_date(
