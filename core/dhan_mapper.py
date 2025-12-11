@@ -40,9 +40,7 @@ class DhanMapper:
             return
 
         logger.info('Downloading Dhan Scrip Master...')
-        logger.info(
-            'This may take a few minutes depending on your connection...'
-        )
+        logger.info('This may take a few minutes depending on your connection...')
 
         try:
             with requests.get(self.url, stream=True, timeout=60) as r:
@@ -60,9 +58,7 @@ class DhanMapper:
             logger.error(f'Download failed: {e}')
             raise
         except Exception as e:
-            logger.error(
-                f'Unexpected error during download: {e}', exc_info=True
-            )
+            logger.error(f'Unexpected error during download: {e}', exc_info=True)
             raise
 
     def get_security_id(self, trading_symbol):

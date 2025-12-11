@@ -12,19 +12,11 @@ from dotenv import load_dotenv
 
 # --- 1. Robust Import Setup ---
 try:
-    from utils.generate_expiry_dates import (
-        select_expiry_date,
-        select_expiry_label,
-    )
+    from utils.generate_expiry_dates import select_expiry_date, select_expiry_label
 except ImportError:
     try:
-        sys.path.append(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-        from utils.generate_expiry_dates import (
-            select_expiry_date,
-            select_expiry_label,
-        )
+        sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from utils.generate_expiry_dates import select_expiry_date, select_expiry_label
     except ImportError:
         # Fallback dummy functions
         def select_expiry_date(
@@ -103,14 +95,14 @@ def now_ist() -> datetime:
 
 
 def detect_positional(text: str) -> bool:
-    return bool(
-        re.search(r'POSITIONAL|POSTIONAL|POSITION|LONG TERM|HOLD', text.upper())
-    )
+    return bool(re.search(r'POSITIONAL|POSTIONAL|POSITION|LONG TERM|HOLD', text.upper()))
 
 
 def extract_stock_name(text: str) -> Optional[str]:
     """Captures text between BUY/SELL and the Strike Price for Stocks."""
-    pattern = r'(?:BUY|SELL)\s+([A-Z0-9\s\&\-]+?)\s+(\d+(?:\.\d+)?)\s*(?:CE|PE|C|P|CALL|PUT)'
+    pattern = (
+        r'(?:BUY|SELL)\s+([A-Z0-9\s\&\-]+?)\s+(\d+(?:\.\d+)?)\s*(?:CE|PE|C|P|CALL|PUT)'
+    )
     match = re.search(pattern, text.upper())
 
     if match:
@@ -231,9 +223,7 @@ def parse_single_block(
         out['trigger_above'] = float(trigger_match.group(1))
 
     # 7. Extract SL (FIXED WITH \b)
-    sl_match = re.search(
-        r'\b(?:SL|STOP\s*LOSS)[\s:\-]*(\d+(?:\.\d+)?)', clean_text
-    )
+    sl_match = re.search(r'\b(?:SL|STOP\s*LOSS)[\s:\-]*(\d+(?:\.\d+)?)', clean_text)
     if sl_match:
         out['stop_loss'] = float(sl_match.group(1))
 
@@ -476,9 +466,7 @@ if __name__ == '__main__':
     print('-' * 65)
 
     for r in results:
-        trig = (
-            str(r['trigger_above']) if r['trigger_above'] is not None else '---'
-        )
+        trig = str(r['trigger_above']) if r['trigger_above'] is not None else '---'
         sl = str(r['stop_loss']) if r['stop_loss'] is not None else '---'
         pos = 'YES' if r['is_positional'] else 'NO'
         print(

@@ -54,9 +54,7 @@ def _last_weekday_of_month(year: int, month: int, weekday: int) -> date:
     return last_date - timedelta(days=offset)
 
 
-def select_expiry_date(
-    underlying: str, reference_dt: Optional[datetime] = None
-) -> date:
+def select_expiry_date(underlying: str, reference_dt: Optional[datetime] = None) -> date:
     """
     Calculates expiry based on User Rules + Holiday Logic:
       - NIFTY     : Every Tuesday
@@ -126,9 +124,7 @@ def select_expiry_date(
     return calculated_date
 
 
-def select_expiry_label(
-    underlying: str, reference_dt: Optional[datetime] = None
-) -> str:
+def select_expiry_label(underlying: str, reference_dt: Optional[datetime] = None) -> str:
     """Returns expiry in 'DD MMM' format (e.g., '27 NOV')."""
     d = select_expiry_date(underlying, reference_dt)
     return f'{d.day:02d} {d.strftime("%b").upper()}'
@@ -142,9 +138,7 @@ if __name__ == '__main__':
     # TEST CASE: Today is Tuesday, 25 Nov 2025 (The Last Tuesday/Expiry Day)
     mock_today = datetime(2025, 11, 25, 9, 15)
 
-    print(
-        f'Testing Reference Date: {mock_today.strftime("%Y-%m-%d %A")} (EXPIRY DAY)\n'
-    )
+    print(f'Testing Reference Date: {mock_today.strftime("%Y-%m-%d %A")} (EXPIRY DAY)\n')
 
     test_cases = ['NIFTY', 'SENSEX', 'BANKNIFTY', 'RELIANCE']
 

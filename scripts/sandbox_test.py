@@ -98,9 +98,7 @@ def run_sandbox():
 
             # Check 1: Did it switch to MARKET because LTP (101) > Entry (100)?
             if payload['orderType'] == 'MARKET':
-                print(
-                    '✅ Logic Check: Order converted to MARKET (Chase Zone) - PASSED'
-                )
+                print('✅ Logic Check: Order converted to MARKET (Chase Zone) - PASSED')
             else:
                 print(
                     f'❌ Logic Check: Expected MARKET, got {payload["orderType"]} - FAILED'
@@ -108,19 +106,13 @@ def run_sandbox():
 
             # Check 2: Is Price 0 for Market Order?
             if payload['price'] == 0:
-                print(
-                    '✅ Logic Check: Price set to 0 for Market Order - PASSED'
-                )
+                print('✅ Logic Check: Price set to 0 for Market Order - PASSED')
             else:
-                print(
-                    f'❌ Logic Check: Price is {payload["price"]}, expected 0 - FAILED'
-                )
+                print(f'❌ Logic Check: Price is {payload["price"]}, expected 0 - FAILED')
 
             # Check 3: Positional Flag
             if payload['productType'] == 'MARGIN':
-                print(
-                    '✅ Logic Check: Product set to MARGIN (Positional) - PASSED'
-                )
+                print('✅ Logic Check: Product set to MARGIN (Positional) - PASSED')
             else:
                 print(
                     f'❌ Logic Check: Expected MARGIN, got {payload["productType"]} - FAILED'

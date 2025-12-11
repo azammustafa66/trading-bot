@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 from datetime import datetime
 from typing import Any, Dict
@@ -65,15 +66,14 @@ class DhanBridge:
     def get_ltp(self, security_id: str, exchange_segment: str) -> float | None:
         """
         Fetches the latest market price using the active session.
-        Matches API Structure: { "NSE_FNO": ["49081"] }
         """
         if not self.access_token:
+            logger.warning('No access token, cannot fetch LTP')
             return None
         try:
             url = f'{self.base_url}/marketfeed/ltp'
 
-            # Correct Payload: Dictionary keys are segments
-            payload = {exchange_segment: [str(security_id)]}
+            payload = {exchange_segment: [int(security_id)]}
 
             response = self.session.post(url=url, json=payload, timeout=5)
             data = response.json()
@@ -82,16 +82,16 @@ class DhanBridge:
                 logger.error(f'LTP Failed. API Response: {data}')
                 return None
 
-            # Nested Parsing: Data -> Exchange -> SecurityID -> details
             segment_data = data['data'].get(exchange_segment, {})
             item = segment_data.get(str(security_id))
 
             if item:
                 return float(item.get('last_price', 0))
 
-            logger.warning(
-                f'LTP key missing for {exchange_segment}:{security_id}'
-            )
+            # Debugging fallback
+            logger.warning(f'LTP key missing for {exchange_segment}:{security_id}')
+            # logger.debug(f'   Payload Sent: {payload}')
+            # logger.debug(f'   Keys Received: {list(segment_data.keys())[:5]}...')
             return None
 
         except Exception as e:
@@ -111,7 +111,7 @@ class DhanBridge:
         try:
             available_funds = self.get_funds()
             total_funds = available_funds if available_funds is not None else 0
-            risk_capital = (
+            risk_capital = math.ceil(
                 total_funds * 0.02 if is_positional else total_funds * 0.0125
             )
 
@@ -119,10 +119,10 @@ class DhanBridge:
             if sl_gap < 1.0:
                 sl_gap = 1.0
 
-            raw_qty = risk_capital / sl_gap
+            raw_qty = math.ceil(risk_capital / sl_gap)
 
             num_lots = max(1, round(raw_qty / lot_size))
-            final_qty = int(num_lots * lot_size)
+            final_qty = math.ceil(num_lots * lot_size)
 
             logger.info(
                 f'Qty Calc: Risk INR {risk_capital} | Gap {sl_gap:.2f} | {num_lots} Lots -> {final_qty}'
@@ -161,11 +161,7 @@ class DhanBridge:
                 return
 
             # 3. Determine Exchange Segment
-            exch_seg = (
-                'BSE_FNO'
-                if (exch_id == 'BSE' or sym == 'SENSEX')
-                else 'NSE_FNO'
-            )
+            exch_seg = 'BSE_FNO' if (exch_id == 'BSE' or sym == 'SENSEX') else 'NSE_FNO'
 
             # 4. LTP Logic, Buffer Check & Order Type
             current_ltp = self.get_ltp(sec_id, exch_seg)
@@ -244,18 +240,14 @@ class DhanBridge:
             target_price = entry_price * 10.0
 
             price_to_send = (
-                self.round_to_tick(entry_price + 0.5)
-                if order_type == 'LIMIT'
-                else 0
+                self.round_to_tick(entry_price + 0.5) if order_type == 'LIMIT' else 0
             )
 
             target_price = self.round_to_tick(target_price)
             sl_price = self.round_to_tick(sl_price)
             trailing_jump = self.round_to_tick(entry_price * 0.05)
 
-            qty = self.calculate_quantity(
-                entry_price, sl_price, is_positional, lot_size
-            )
+            qty = self.calculate_quantity(entry_price, sl_price, is_positional, lot_size)
             product_type = 'MARGIN' if is_positional else 'INTRADAY'
 
             # 7. Payload
@@ -283,9 +275,7 @@ class DhanBridge:
             response = self.session.post(url, json=payload, timeout=10)
             data = response.json()
 
-            if response.status_code in [200, 201] and data.get(
-                'orderStatus'
-            ) in [
+            if response.status_code in [200, 201] and data.get('orderStatus') in [
                 'PENDING',
                 'TRADED',
                 'TRANSIT',

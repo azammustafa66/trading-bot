@@ -111,9 +111,7 @@ def run_full_simulation():
         if payload['productType'] == 'MARGIN':
             print('✅ Product Type: MARGIN (Correct for Positional)')
         else:
-            errors.append(
-                f'Product Type: Expected MARGIN, got {payload["productType"]}'
-            )
+            errors.append(f'Product Type: Expected MARGIN, got {payload["productType"]}')
 
         # Check 2: Smart Entry Logic
         # LTP (24100) > Entry (24050). Should be Market Order.

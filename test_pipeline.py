@@ -1,8 +1,5 @@
-import json
 import logging
-import os
-from datetime import date, datetime
-from typing import Any, Dict
+from datetime import date
 
 # 1. Setup Environment & Logging
 from dotenv import load_dotenv
@@ -53,9 +50,7 @@ class MockSession:
             logger.info(
                 f'🔮 [MOCK API] Fetching LTP for {exch}:{sec_id}... Returning {fake_ltp}'
             )
-            return MockResponse(
-                {'data': {f'{exch}:{sec_id}': {'last_price': fake_ltp}}}
-            )
+            return MockResponse({'data': {f'{exch}:{sec_id}': {'last_price': fake_ltp}}})
 
         # B. Intercept Order Calls
         if 'orders' in url:
@@ -65,16 +60,12 @@ class MockSession:
             print(f'   Exchange   : {json.get("exchangeSegment")}')  # type: ignore
             print(f'📤 PAYLOAD:\n{json.dumps(json, indent=2)}')  # pyright: ignore[reportOptionalMemberAccess]
             print('=' * 60 + '\n')
-            return MockResponse(
-                {'orderStatus': 'PENDING', 'orderId': 'TEST-ORDER-123'}
-            )
+            return MockResponse({'orderStatus': 'PENDING', 'orderId': 'TEST-ORDER-123'})
 
         return MockResponse({})
 
 
 # --- 4. The Test Runner ---
-
-
 def run_mega_test():
     print('\n🧪 STARTING MEGA PIPELINE TEST (PARSE -> MAP -> TRADE)')
     print('=' * 60)
@@ -125,14 +116,12 @@ def run_mega_test():
         sec_id, exch, lot = mapper.get_security_id(tsym)
 
         if sec_id and lot != -1:
-            print(f'      🎉 SUCCESS: Security ID Found!')
+            print('      🎉 SUCCESS: Security ID Found!')
             print(f'      🆔 ID      : {sec_id}')
-            print(
-                f'      🏛️ Exchange: {exch} (Should be NSE for Stocks, BSE for Sensex)'
-            )
+            print(f'      🏛️ Exchange: {exch} (Should be NSE for Stocks, BSE for Sensex)')
             print(f'      📦 Lot Size: {lot}')
         else:
-            print(f'      ❌ FAILURE: Security ID NOT FOUND in CSV.')
+            print('      ❌ FAILURE: Security ID NOT FOUND in CSV.')
             print(
                 '      💡 Tip: Check if CSV is downloaded and dates match active contracts.'
             )
@@ -140,7 +129,7 @@ def run_mega_test():
 
         # --- STEP 3: EXECUTE (MOCKED) ---
         try:
-            print(f'   🚀 Step 3 (Trade): Sending to Bridge...')
+            print('   🚀 Step 3 (Trade): Sending to Bridge...')
             # Bridge will call mapper again internally, but that's fine.
             # We watch the 'MOCK API' output to see the final JSON payload.
             bridge.execute_super_order(signal)
