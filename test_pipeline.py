@@ -47,9 +47,7 @@ class MockSession:
             sec_id = json['instruments'][0]['securityId']  # pyright: ignore[reportOptionalSubscript]
             exch = json['instruments'][0]['exchangeSegment']  # pyright: ignore[reportOptionalSubscript]
             fake_ltp = 155.05
-            logger.info(
-                f'🔮 [MOCK API] Fetching LTP for {exch}:{sec_id}... Returning {fake_ltp}'
-            )
+            logger.info(f'🔮 [MOCK API] Fetching LTP for {exch}:{sec_id}... Returning {fake_ltp}')
             return MockResponse({'data': {f'{exch}:{sec_id}': {'last_price': fake_ltp}}})
 
         # B. Intercept Order Calls
@@ -122,9 +120,7 @@ def run_mega_test():
             print(f'      📦 Lot Size: {lot}')
         else:
             print('      ❌ FAILURE: Security ID NOT FOUND in CSV.')
-            print(
-                '      💡 Tip: Check if CSV is downloaded and dates match active contracts.'
-            )
+            print('      💡 Tip: Check if CSV is downloaded and dates match active contracts.')
             continue  # Stop if mapping fails
 
         # --- STEP 3: EXECUTE (MOCKED) ---

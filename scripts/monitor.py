@@ -39,9 +39,7 @@ class BotHealthMonitor:
                 return True
 
             # Check for systemd service
-            result = (
-                os.popen('systemctl is-active trading-bot 2>/dev/null').read().strip()
-            )
+            result = os.popen('systemctl is-active trading-bot 2>/dev/null').read().strip()
             if result == 'active':
                 logger.info('✓ Bot process is running (systemd service)')
                 return True
@@ -64,9 +62,7 @@ class BotHealthMonitor:
             mtime = datetime.fromtimestamp(self.trade_log.stat().st_mtime)
             age = datetime.now() - mtime
             if age > timedelta(minutes=5):
-                issues.append(
-                    f"Main log hasn't been updated in {age.seconds // 60} minutes"
-                )
+                issues.append(f"Main log hasn't been updated in {age.seconds // 60} minutes")
             else:
                 logger.info(f'✓ Main log is active (last update: {age.seconds}s ago)')
 
@@ -139,9 +135,7 @@ class BotHealthMonitor:
             if timestamp_str:
                 # Parse timestamp
                 try:
-                    timestamp = datetime.fromisoformat(
-                        timestamp_str.replace('Z', '+00:00')
-                    )
+                    timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
                     # Remove timezone for comparison
                     if timestamp.tzinfo:
                         timestamp = timestamp.replace(tzinfo=None)

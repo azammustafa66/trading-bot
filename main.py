@@ -19,7 +19,7 @@ LOG_BACKUP_COUNT = int(os.getenv('LOG_BACKUP_COUNT', '5'))
 os.makedirs('logs', exist_ok=True)
 
 file_handler = RotatingFileHandler(
-    filename='logs/trade_logs.log',
+    'logs/trade_logs.log',
     mode='a',
     maxBytes=MAX_LOG_SIZE,
     backupCount=LOG_BACKUP_COUNT,
@@ -33,7 +33,7 @@ file_handler.setFormatter(
 )
 
 error_handler = RotatingFileHandler(
-    filename='logs/errors.log',
+    'logs/errors.log',
     mode='a',
     maxBytes=MAX_LOG_SIZE,
     backupCount=LOG_BACKUP_COUNT,
@@ -95,7 +95,6 @@ os.makedirs('data', exist_ok=True)
 
 # --- SHUTDOWN HANDLING ---
 def handle_shutdown_signal(signum, frame):
-    """Handle shutdown signals (SIGTERM, SIGINT) with proper logging and clean exit"""
     sig_name = signal.Signals(signum).name
     logger.info('=' * 60)
     logger.info(f'Received {sig_name} - Shutting down gracefully...')
@@ -104,41 +103,49 @@ def handle_shutdown_signal(signum, frame):
     sys.exit(0)
 
 
-# Register signal handlers
 signal.signal(signal.SIGTERM, handle_shutdown_signal)
 signal.signal(signal.SIGINT, handle_shutdown_signal)
 
 
-# --- MARKET HOURS MONITOR ---
-async def check_market_hours(client: TelegramClient):
-    """Checks every minute if market is closed (3:30 PM IST)."""
-    logger.info('⏰ Market Hours Monitor Started (Auto-Stop at 15:30)')
-
+# --- MARKET HOURS & FRIDAY SQUARE OFF ---
+async def check_market_hours(client: TelegramClient, bridge: DhanBridge):
+    """
+    1. Checks for Friday 3:18 PM Square-off
+    2. Checks for Daily 3:30 PM Shutdown
+    """
     stop_time = time(15, 30)  # 3:30 PM
+
+    logger.info('⏰ Market Monitor Started (Fri SqOff: 15:18 | Stop: 15:30)')
 
     while True:
         now = datetime.now()
 
-        # If current time is past 3:30 PM
+        # --- FRIDAY 15:18 CHECK ---
+        # now.weekday() == 4 means FRIDAY
+        if now.weekday() == 4:
+            if now.time().hour == 15 and now.time().minute == 18:
+                logger.warning('📅 It is Friday 3:18 PM! Triggering Auto-Square Off.')
+                try:
+                    bridge.square_off_all()
+                except Exception as e:
+                    logger.error(f'Square Off Failed: {e}')
+
+                # Sleep 65s so we don't trigger again in the same minute
+                await asyncio.sleep(65)
+
+        # --- DAILY STOP CHECK ---
         if now.time() >= stop_time:
             logger.info('🛑 Market Closed (3:30 PM). Stopping Bot...')
             await client.disconnect()  # pyright: ignore[reportGeneralTypeIssues]
-            return
+            return  # Clean exit from task
 
-        await asyncio.sleep(0.5 * 60 * 60)
+        await asyncio.sleep(30)
 
 
 # --- HELPER FUNCTIONS ---
 async def resolve_channel(client: TelegramClient, target: str):
-    """
-    Robust channel resolution:
-    1. Numeric ID
-    2. Username
-    3. Exact Title Match
-    """
     logger.info(f'🔍 Resolving channel: {target}')
 
-    # 1) Try numeric ID
     if str(target).lstrip('-').isdigit():
         try:
             entity = await client.get_entity(int(target))
@@ -147,7 +154,6 @@ async def resolve_channel(client: TelegramClient, target: str):
         except Exception as e:
             logger.debug(f'Failed to resolve by ID: {e}')
 
-    # 2) Try username / raw get_entity
     try:
         entity = await client.get_entity(target)
         title = getattr(entity, 'title', getattr(entity, 'username', target))
@@ -156,7 +162,6 @@ async def resolve_channel(client: TelegramClient, target: str):
     except Exception as e:
         logger.debug(f'Failed to resolve by username: {e}')
 
-    # 3) Search by title exact match
     logger.info(f"🔍 Searching dialogs for title: '{target}'...")
     async for d in client.iter_dialogs(limit=500):
         title = getattr(d.entity, 'title', '')
@@ -186,13 +191,8 @@ class SignalBatcher:
     async def _process_after_delay(self):
         try:
             await asyncio.sleep(BATCH_DELAY_SECONDS)
-
             logger.info(f'⚡ Processing batch of {len(self.batch_messages)} messages...')
 
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(f'Batch content: {self.batch_messages}')
-
-            # 1. PARSE & SAVE
             try:
                 results = process_and_save(
                     self.batch_messages,
@@ -200,28 +200,21 @@ class SignalBatcher:
                     jsonl_path=SIGNALS_JSONL,
                     json_path=SIGNALS_JSON,
                 )
-                logger.debug(f'Parser returned {len(results) if results else 0} signals')
             except Exception as e:
                 logger.error(f'❌ Signal parsing failed: {e}', exc_info=True)
                 results = []
 
-            # 2. EXECUTE TRADES
             if results:
                 logger.info(f'Found {len(results)} valid signal(s)')
                 for idx, res in enumerate(results, 1):
                     logger.info(
                         f'Signal {idx}/{len(results)}: {res["trading_symbol"]} | '
-                        f'{res["action"]} | Entry: {res.get("trigger_above", "N/A")} | '
-                        f'SL: {res.get("stop_loss", "N/A")}'
+                        f'{res["action"]} | Entry: {res.get("trigger_above", "N/A")}'
                     )
-
                     try:
                         self.bridge.execute_super_order(res)
                     except Exception as e:
-                        logger.error(
-                            f'Order execution failed for {res["trading_symbol"]}: {e}',
-                            exc_info=True,
-                        )
+                        logger.error(f'Order execution failed: {e}', exc_info=True)
             else:
                 logger.info('No valid signals found in batch.')
 
@@ -235,27 +228,23 @@ class SignalBatcher:
                 self.batch_messages = []
                 self.batch_dates = []
                 self._timer_task = None
-                logger.debug('Batch buffer cleared')
 
 
 async def main():
     logger.info('=' * 60)
-    logger.info('🤖 Trading Bot Starting (Multi-Channel Support)...')
+    logger.info('🤖 Trading Bot Starting...')
     logger.info('=' * 60)
 
-    # 1. Validation
     if not TELEGRAM_API_ID or not TELEGRAM_API_HASH:
-        logger.critical('Missing TELEGRAM_API_ID or TELEGRAM_API_HASH in .env')
+        logger.critical('Missing TELEGRAM_API_ID or TELEGRAM_API_HASH')
         return
     if not TARGET_CHANNELS:
-        logger.critical('Missing TARGET_CHANNELS in .env')
+        logger.critical('Missing TARGET_CHANNELS')
         return
 
     logger.info('📋 Configuration loaded')
-    logger.info(f'   - Channels Target: {len(TARGET_CHANNELS)}')
-    logger.info(f'   - Log Level: {LOG_LEVEL}')
+    logger.info(f'   - Channels: {len(TARGET_CHANNELS)}')
 
-    # 2. Initialize Bridge
     logger.info('Initializing Dhan Bridge...')
     try:
         bridge = DhanBridge()
@@ -264,10 +253,8 @@ async def main():
         logger.critical(f'Failed to initialize Dhan Bridge: {e}', exc_info=True)
         return
 
-    # 3. Initialize Batcher
     batcher = SignalBatcher(bridge)
 
-    # 4. Start Telegram Client
     logger.info('Connecting to Telegram...')
     try:
         client = TelegramClient(
@@ -275,20 +262,18 @@ async def main():
             api_id=int(TELEGRAM_API_ID),
             api_hash=TELEGRAM_API_HASH,
         )
-        await client.start()  # pyright: ignore
-        logger.info('Connected to Telegram')
+        await client.start()  # pyright: ignore[reportGeneralTypeIssues]
+        logger.info('✅ Connected to Telegram')
 
-        # --- START MARKET HOURS CHECKER ---
-        asyncio.create_task(check_market_hours(client))
+        # --- START MARKET MONITOR (Pass 'bridge' for Friday SqOff) ---
+        asyncio.create_task(check_market_hours(client, bridge))
 
     except Exception as e:
         logger.critical(f'Failed to connect to Telegram: {e}', exc_info=True)
         return
 
-    # 5. Resolve ALL target channels
     resolved_chats = []
     logger.info('Resolving target channels...')
-
     for target in TARGET_CHANNELS:
         try:
             entity = await resolve_channel(client, target)
@@ -296,112 +281,66 @@ async def main():
             logger.info(f'Added listener for: {getattr(entity, "title", target)}')
         except Exception as e:
             logger.error(f"   Failed to resolve '{target}': {e}")
-            logger.error('    Check permissions or channel name spelling.')
 
     if not resolved_chats:
-        logger.critical('No channels could be resolved. Exiting.')
+        logger.critical('No channels resolved. Exiting.')
         return
 
-    # --- ADMIN COMMANDS HANDLER ---
+    # --- ADMIN COMMANDS ---
     if ADMIN_ID:
         try:
             admin_id_int = int(ADMIN_ID)
             logger.info(f'🛡️ Admin Commands Enabled for User ID: {admin_id_int}')
 
-            @client.on(event=events.NewMessage(from_users=[admin_id_int]))
+            @client.on(events.NewMessage(from_users=[admin_id_int]))
             async def admin_handler(event):
                 text = event.raw_text.lower().strip()
 
-                # /status
                 if text == '/status':
                     funds = bridge.get_funds()
                     fund_str = f'₹{funds:.2f}' if funds is not None else 'Error'
-                    status_msg = (
-                        f'🤖 **Bot Status**\n'
-                        f'✅ Service Running\n'
-                        f'💰 Funds: {fund_str}\n'
-                        f'📡 Channels: {len(resolved_chats)}\n'
-                        f'🕒 {datetime.now().strftime("%H:%M:%S")}'
+                    await event.reply(
+                        f'🤖 **Status**\n💰 Funds: {fund_str}\n🕒 {datetime.now().strftime("%H:%M:%S")}'
                     )
-                    await event.reply(status_msg)
 
-                # /logs
                 elif text == '/logs':
                     await event.reply('📤 Uploading logs...')
-                    try:
-                        files = []
-                        if os.path.exists('logs/trade_logs.log'):
-                            files.append('logs/trade_logs.log')
-                        if os.path.exists('logs/errors.log'):
-                            files.append('logs/errors.log')
+                    files = [
+                        f for f in ['logs/trade_logs.log', 'logs/errors.log'] if os.path.exists(f)
+                    ]
+                    await event.reply(file=files) if files else await event.reply('⚠️ No logs.')
 
-                        if files:
-                            await event.reply(file=files)
-                        else:
-                            await event.reply('⚠️ No logs found.')
-                    except Exception as e:
-                        await event.reply(f'❌ Error: {e}')
-
-                # /tail
                 elif text == '/tail':
                     try:
                         with open('logs/trade_logs.log', 'r') as f:
-                            lines = f.readlines()
-                            last_lines = ''.join(lines[-30:])
-                        await event.reply(f'**Last 30 Lines:**\n```{last_lines}```')
+                            lines = f.readlines()[-15:]
+                        await event.reply(f'```{"".join(lines)}```')
                     except Exception as e:
-                        await event.reply(f'❌ Error: {e}')
+                        await event.reply(f'Error reading logs {e}')
 
-                # /check <ID>
-                elif text.startswith('/check'):
-                    parts = text.split()
-                    if len(parts) > 1:
-                        tid = parts[1]
-                        # Default check NSE_FNO
-                        ltp = bridge.get_ltp(tid, 'NSE_FNO')
-                        if ltp is None:
-                            # Try BSE_FNO if NSE fails
-                            ltp = bridge.get_ltp(tid, 'BSE_FNO')
-
-                        val = ltp if ltp else 'Not Found'
-                        await event.reply(f'🔍 **Check {tid}**\nPrice: **{val}**')
-                    else:
-                        await event.reply('Usage: `/check <security_id>`')
+                elif text == '/force_sqoff':  # Emergency manual trigger
+                    await event.reply('⚠️ Force Square-off Triggered!')
+                    bridge.square_off_all()
 
         except ValueError:
             logger.error('❌ ADMIN_ID in .env is not a valid number')
 
     logger.info('=' * 60)
     logger.info(f'Listening to {len(resolved_chats)} channel(s)')
-    logger.info(f'Started at: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
     logger.info('=' * 60)
 
-    # 6. Signal Event Loop
     @client.on(events.NewMessage(chats=resolved_chats))
     async def handler(event):
         try:
             text = event.message.message
-            if not text:
-                return
-
-            chat_title = 'Unknown'
-            try:
-                chat = await event.get_chat()
-                chat_title = getattr(chat, 'title', getattr(chat, 'username', 'Unknown'))
-            except Exception as e:
-                logger.warning(f'{e}')
-
-            # Preview
-            preview = text.replace('\n', ' ')[:50]
-            logger.info(f'[{chat_title}] Received: {preview}...')
-
-            await batcher.add_message(text, event.message.date)
-
+            if text:
+                await batcher.add_message(text, event.message.date)
+                logger.info(f'Received msg (len {len(text)})')
         except Exception as e:
             logger.error(f'Handler Error: {e}', exc_info=True)
 
     try:
-        await client.run_until_disconnected()  # pyright: ignore
+        await client.run_until_disconnected()  # pyright: ignore[reportGeneralTypeIssues]
     except Exception as e:
         logger.critical(f'Client disconnected: {e}', exc_info=True)
         raise
@@ -411,12 +350,9 @@ if __name__ == '__main__':
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info('=' * 60)
         logger.info('Bot Stopped (Keyboard Interrupt)')
-        logger.info(f'Stopped at: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
-        logger.info('=' * 60)
     except SystemExit:
-        pass  # Clean exit
+        pass
     except Exception as e:
         logger.critical(f'Critical Crash: {e}', exc_info=True)
         sys.exit(1)

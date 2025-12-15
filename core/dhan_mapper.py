@@ -107,9 +107,7 @@ class DhanMapper:
 
                 return sec_id, exch, lot_size
 
-            logger.warning(
-                f'ID Not Found for: {trading_symbol}'
-            )
+            logger.warning(f'ID Not Found for: {trading_symbol}')
             return '', '', -1
 
         except Exception as e:

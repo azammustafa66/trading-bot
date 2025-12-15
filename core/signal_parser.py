@@ -21,14 +21,10 @@ except ImportError:
                                                  select_expiry_label)
     except ImportError:
         # Fallback dummy functions
-        def select_expiry_date(
-            underlying: str, reference_dt: Optional[datetime] = None
-        ) -> date:
+        def select_expiry_date(underlying: str, reference_dt: Optional[datetime] = None) -> date:
             return date.today()
 
-        def select_expiry_label(
-            underlying: str, reference_dt: Optional[datetime] = None
-        ) -> str:
+        def select_expiry_label(underlying: str, reference_dt: Optional[datetime] = None) -> str:
             return 'TEST-EXPIRY'
 
 
@@ -102,9 +98,7 @@ def detect_positional(text: str) -> bool:
 
 def extract_stock_name(text: str) -> Optional[str]:
     """Captures text between BUY/SELL and the Strike Price for Stocks."""
-    pattern = (
-        r'(?:BUY|SELL)\s+([A-Z0-9\s\&\-]+?)\s+(\d+(?:\.\d+)?)\s*(?:CE|PE|C|P|CALL|PUT)'
-    )
+    pattern = r'(?:BUY|SELL)\s+([A-Z0-9\s\&\-]+?)\s+(\d+(?:\.\d+)?)\s*(?:CE|PE|C|P|CALL|PUT)'
     match = re.search(pattern, text.upper())
 
     if match:
@@ -161,9 +155,7 @@ def is_price_only(text: str) -> bool:
     return all(re.fullmatch(r'[\d\.\-\s]+', ln) for ln in lines)
 
 
-def parse_single_block(
-    text: str, reference_date: Optional[date] = None
-) -> Dict[str, Any]:
+def parse_single_block(text: str, reference_date: Optional[date] = None) -> Dict[str, Any]:
     clean_text = text.strip().upper()
 
     out: Dict[str, Any] = {
@@ -181,11 +173,7 @@ def parse_single_block(
     }
 
     # 1. Fast Fail Filters
-    if (
-        not clean_text
-        or is_price_only(clean_text)
-        or any(k in clean_text for k in IGNORE_KEYWORDS)
-    ):
+    if not clean_text or is_price_only(clean_text) or any(k in clean_text for k in IGNORE_KEYWORDS):
         out['ignore'] = True
         return out
 
@@ -203,9 +191,7 @@ def parse_single_block(
     out['underlying'] = detect_underlying(text)
 
     # 5. Extract Strike + Option Type
-    strike_match = re.search(
-        r'\b(\d{4,6}|\d{2,5}(?:\.\d+)?)\s*(CE|PE|C|P|CALL|PUT)?\b', clean_text
-    )
+    strike_match = re.search(r'\b(\d{4,6}|\d{2,5}(?:\.\d+)?)\s*(CE|PE|C|P|CALL|PUT)?\b', clean_text)
     if strike_match:
         raw_strike = strike_match.group(1)
         if '.' in raw_strike:
@@ -238,9 +224,7 @@ def parse_single_block(
             else:
                 ref_d = reference_date or date.today()
                 ref_dt = datetime.combine(ref_d, time(9, 15))
-                label = select_expiry_label(
-                    underlying=out['underlying'], reference_dt=ref_dt
-                )
+                label = select_expiry_label(underlying=out['underlying'], reference_dt=ref_dt)
 
             out['expiry_label'] = label
             out['trading_symbol'] = (
@@ -317,9 +301,7 @@ def process_and_save(
 
         current_ts = to_ist(dt)
         last_ts = to_ist(buffer_dates[-1]) if buffer_dates else current_ts
-        is_stale = (current_ts and last_ts) and (
-            current_ts - last_ts
-        ).total_seconds() > 300
+        is_stale = (current_ts and last_ts) and (current_ts - last_ts).total_seconds() > 300
 
         should_flush = False
 
@@ -372,9 +354,7 @@ def process_and_save(
                 and old_sig.get('action') == new_sig['action']
             ):
                 old_ts = to_ist(old_sig.get('timestamp'))
-                if old_ts and (new_ts - old_ts).total_seconds() < (
-                    DEDUPE_WINDOW_MINUTES * 60
-                ):
+                if old_ts and (new_ts - old_ts).total_seconds() < (DEDUPE_WINDOW_MINUTES * 60):
                     is_dupe = True
                     logger.info(
                         f'Duplicate detected: {new_sig["trading_symbol"]} (Already processed recently)'
@@ -471,6 +451,4 @@ if __name__ == '__main__':
         trig = str(r['trigger_above']) if r['trigger_above'] is not None else '---'
         sl = str(r['stop_loss']) if r['stop_loss'] is not None else '---'
         pos = 'YES' if r['is_positional'] else 'NO'
-        print(
-            f'{r["trading_symbol"]:<35} | {r["action"]:<5} | {trig:<5} | {sl:<5} | {pos}'
-        )
+        print(f'{r["trading_symbol"]:<35} | {r["action"]:<5} | {trig:<5} | {sl:<5} | {pos}')

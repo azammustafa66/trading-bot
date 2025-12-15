@@ -1,12 +1,9 @@
 [tool.ruff]
-# Set the max line length (same as your autopep8 config)
-line-length = 90
+line-length = 100
+lint.select = ["E", "F"]
 
 [tool.ruff.format]
-# THE SETTING YOU WANT:
 quote-style = "single"
-
-# Other prettier-like settings:
 indent-style = "space"
 skip-magic-trailing-comma = false
 line-ending = "auto"
