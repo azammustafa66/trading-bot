@@ -1,6 +1,7 @@
 import logging
 import math
 import os
+import time
 from datetime import datetime, timedelta
 from typing import Any, Dict
 
@@ -21,6 +22,7 @@ class DhanBridge:
         self.client_id = os.getenv('DHAN_CLIENT_ID')
         self.access_token = os.getenv('DHAN_ACCESS_TOKEN')
         self.base_url = 'https://api.dhan.co/v2'
+        self.kill_switch_triggered = False
         self.session = requests.Session()
         self.mapper = DhanMapper()
 
@@ -58,7 +60,6 @@ class DhanBridge:
     def get_ltp(self, security_id: str, exchange_segment: str) -> float | None:
         if not self.access_token:
             return None
-
         try:
             url = f'{self.base_url}/marketfeed/ltp'
             payload = {exchange_segment: [int(security_id)]}
@@ -102,38 +103,21 @@ class DhanBridge:
         except Exception:
             return lot_size
 
-    def get_dynamic_trail(
-        self,
-        security_id: str,
-        exchange_segment: str,
-        entry_price: float,
-        symbol: str,
-        is_positional: bool,
-    ) -> float:
-        """
-        Calculates ATR based Trailing Jump.
-        - Intraday: 5-min candles, 1.5x ATR
-        - Positional: 60-min candles, 2.5x ATR
-        """
-        atr_trail = None
-
+    # --- UNIFIED ATR MODULE ---
+    def fetch_atr(
+        self, security_id: str, exchange_segment: str, symbol: str, is_positional: bool
+    ) -> float | None:
         try:
             is_index = any(x in symbol.upper() for x in ['NIFTY', 'BANKNIFTY', 'SENSEX'])
             instrument_type = 'OPTIDX' if is_index else 'OPTSTK'
 
-            # --- ADAPTIVE TIMEFRAME LOGIC ---
             if is_positional:
-                interval = 60
+                interval = 60  # 1 Hour
                 lookback_days = 15
-                multiplier = 2.5
-                logger.info('Using POSITIONAL settings: 60min candles | 2.5x ATR')
             else:
-                interval = 5
+                interval = 5  # 5 Min
                 lookback_days = 3
-                multiplier = 1.5
-                logger.info('Using INTRADAY settings: 5min candles | 1.5x ATR')
 
-            # Calculate Date Range
             to_date = datetime.now()
             from_date = to_date - timedelta(days=lookback_days)
 
@@ -147,7 +131,7 @@ class DhanBridge:
                 'toDate': to_date.strftime('%Y-%m-%d'),
             }
 
-            response = self.session.post(url, json=payload, timeout=5)
+            response = self.session.post(url, json=payload, timeout=4)
             data = response.json()
 
             if data and 'high' in data and len(data['high']) > 15:
@@ -159,30 +143,14 @@ class DhanBridge:
                 current_atr = atr_array[-1]
 
                 if not np.isnan(current_atr) and current_atr > 0:
-                    atr_trail = current_atr * multiplier
-                    logger.info(
-                        f'ATR({interval}m): {current_atr:.2f} | Trail ({multiplier}x): \
-                        {atr_trail:.2f}'
-                    )
+                    return float(current_atr)
 
         except Exception as e:
-            logger.error(f'TA-Lib Calc Failed: {e}')
+            logger.error(f'ATR Fetch Failed: {e}')
 
-        # Fallback Logic (Tiered System)
-        if atr_trail is None:
-            if entry_price < 50:
-                fallback = 0.5
-            elif 50 <= entry_price < 150:
-                fallback = 2.0
-            elif 150 <= entry_price < 500:
-                fallback = 5.0
-            else:
-                fallback = 10.0
-            logger.info(f'API/Data Issue - Using Tiered Fallback: {fallback}')
-            return fallback
+        return None
 
-        return atr_trail
-
+    # --- POSITION & ORDER MANAGEMENT ---
     def cancel_all_pending_orders(self):
         try:
             url = f'{self.base_url}/orders'
@@ -197,7 +165,7 @@ class DhanBridge:
             if not pending:
                 return
 
-            logger.info(f'Cancelling {len(pending)} pending orders...')
+            logger.info(f'⚠️ Cancelling {len(pending)} pending orders...')
             for o in pending:
                 self.session.delete(f'{self.base_url}/orders/{o["orderId"]}', timeout=5)
         except Exception:
@@ -217,12 +185,15 @@ class DhanBridge:
             return []
 
     def square_off_all(self):
-        logger.info('🚨 FRIDAY SQUARE OFF TRIGGERED 🚨')
-        self.cancel_all_pending_orders()
-        positions = self.get_open_positions()
+        logger.info('🚨 SQUARE OFF SEQUENCE INITIATED 🚨')
 
+        # 1. Cancel Pending Orders First (Super Orders)
+        self.cancel_all_pending_orders()
+
+        # 2. Close Positions
+        positions = self.get_open_positions()
         if not positions:
-            logger.info('No open positions.')
+            logger.info('✅ No open positions.')
             return
 
         for pos in positions:
@@ -243,15 +214,93 @@ class DhanBridge:
                     'validity': 'DAY',
                 }
                 self.session.post(f'{self.base_url}/orders', json=payload, timeout=5)
-                logger.info(f'CLOSED {pos.get("tradingSymbol")}: {action} {qty}')
+                logger.info(f'   🔻 CLOSED {pos.get("tradingSymbol")}: {action} {qty}')
             except Exception as e:
                 logger.error(f'Failed to close {pos.get("tradingSymbol")}: {e}')
 
+    # --- KILL SWITCH MODULE ---
+    def get_total_pnl(self) -> float:
+        """
+        Calculates Total Day P&L (Realized + Unrealized) from positions.
+        """
+        try:
+            url = f'{self.base_url}/positions'
+            response = self.session.get(url, timeout=5)
+            data = response.json()
+
+            if not isinstance(data, list):
+                return 0.0
+
+            total_pnl = 0.0
+            for p in data:
+                realized = float(p.get('realizedProfit', 0.0))
+                unrealized = float(p.get('unrealizedProfit', 0.0))
+                total_pnl += realized + unrealized
+
+            return total_pnl
+        except Exception as e:
+            logger.error(f'Error fetching PnL: {e}')
+            return 0.0
+
+    def activate_kill_switch(self):
+        """
+        Activates Kill Switch via API.
+        Requires all positions to be closed first.
+        """
+        logger.critical('ACTIVATING KILL SWITCH')
+        try:
+            url = f'{self.base_url}/killswitch?killSwitchStatus=ACTIVATE'
+            response = self.session.post(url, timeout=10)
+
+            if response.status_code == 200:
+                logger.info(f'KILL SWITCH ACTIVATED: {response.json()}')
+                return True
+            else:
+                logger.error(f'Kill Switch Failed: {response.text}')
+                return False
+        except Exception as e:
+            logger.error(f'Kill Switch Exception: {e}')
+            return False
+
+    def check_kill_switch(self, loss_limit: float = 8000.0) -> bool:
+        """
+        Checks P&L. If loss >= limit:
+        1. Squares off positions
+        2. Activates Kill Switch
+        3. Returns True (Signal to stop bot)
+        """
+        if self.kill_switch_triggered:
+            return True
+
+        current_pnl = self.get_total_pnl()
+
+        if current_pnl <= -abs(loss_limit):
+            self.kill_switch_triggered = True  # <--- SET FLAG IMMEDIATELY
+
+            logger.critical('=' * 60)
+            logger.critical(f'🛑 LOSS LIMIT BREACHED: {current_pnl} <= -{loss_limit}')
+            logger.critical('=' * 60)
+
+            # 1. Close Everything
+            self.square_off_all()
+
+            # 2. Wait for executions
+            time.sleep(2)
+
+            # 3. Activate Kill Switch
+            self.activate_kill_switch()
+
+            return True
+
+        return False
+
+    # --- MAIN EXECUTION ---
     def execute_super_order(self, signal: Dict[str, Any]):
         if not self.dhan:
             logger.warning('Dhan client not initialized')
             return
 
+        # [Logic remains same as previous turn, just ensuring it calls fetch_atr]
         logger.info('=' * 60)
         logger.info('EXECUTING SUPER ORDER')
 
@@ -292,29 +341,52 @@ class DhanBridge:
                 logger.error('Could not fetch LTP.')
                 return
 
-            # Auto-SL Logic
             anchor_price = entry_price if entry_price > 0 else current_ltp
-            if sl_price == 0 and anchor_price > 0:
-                raw = signal.get('raw', '').upper()
-                if 'HERO' in raw:
+
+            # 1. Fetch ATR
+            atr_val = self.fetch_atr(str(sec_id), exch_seg, sym, is_positional)
+
+            # Fallback logic
+            if anchor_price < 50:
+                fallback_sl_pts = 5.0
+                fallback_trail = 0.5
+            elif 50 <= anchor_price < 150:
+                fallback_sl_pts = 15.0
+                fallback_trail = 2.0
+            elif 150 <= anchor_price < 500:
+                fallback_sl_pts = 30.0
+                fallback_trail = 5.0
+            else:
+                fallback_sl_pts = 50.0
+                fallback_trail = 10.0
+
+            if is_positional:
+                sl_mult, trail_mult = 3.0, 2.5
+            else:
+                sl_mult, trail_mult = 2.0, 1.5
+
+            if atr_val:
+                trailing_jump = atr_val * trail_mult
+            else:
+                trailing_jump = fallback_trail
+
+            if sl_price == 0:
+                raw_text = signal.get('raw', '').upper()
+                if 'HERO' in raw_text:
                     sl_price = 0.05
+                elif atr_val:
+                    sl_price = anchor_price - (atr_val * sl_mult)
                 else:
-                    sl_price = max(anchor_price - 15.0, 0.05)
+                    sl_price = anchor_price - fallback_sl_pts
 
-            if action == 'BUY' and sl_price >= entry_price:
-                sl_price = max(entry_price - 1.0, 0.05)
+            # Finalize Prices
+            sl_price = max(sl_price, 0.05)
+            if action == 'BUY' and sl_price >= anchor_price:
+                sl_price = max(anchor_price - 1.0, 0.05)
 
-            # --- DYNAMIC TRAILING CALCULATION ---
-            # Pass is_positional flag to adapt settings
-            trailing_jump = self.get_dynamic_trail(
-                sec_id, exch_seg, entry_price, sym, is_positional
-            )
-
-            # Rounding
             trailing_jump = self.round_to_tick(trailing_jump)
             target_price = self.round_to_tick(entry_price * 10.0)
             sl_price = self.round_to_tick(sl_price)
-
             trigger_price = self.round_to_tick(entry_price) if order_type == 'LIMIT' else 0.0
             price_to_send = self.round_to_tick(entry_price + 0.5) if order_type == 'LIMIT' else 0.0
 
@@ -338,10 +410,7 @@ class DhanBridge:
                 'trailingJump': float(trailing_jump),
             }
 
-            logger.info(
-                f'SENDING {order_type} | Trail: {trailing_jump} | Positional: {is_positional}'
-            )
-            logger.debug(f'Payload: {payload}')
+            logger.info(f'SENDING {order_type} | Trail: {trailing_jump} | SL: {sl_price}')
 
             url = f'{self.base_url}/super/orders'
             response = self.session.post(url, json=payload, timeout=10)

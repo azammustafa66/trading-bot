@@ -81,6 +81,7 @@ TELEGRAM_API_ID = os.getenv('TELEGRAM_API_ID')
 TELEGRAM_API_HASH = os.getenv('TELEGRAM_API_HASH')
 SESSION_NAME = os.getenv('SESSION_NAME', 'telegram_session')
 ADMIN_ID = os.getenv('ADMIN_ID')
+LOSS_LIMIT = float(os.getenv('LOSS_LIMIT', '8000.0'))
 
 RAW_CHANNELS = os.getenv('TARGET_CHANNELS', os.getenv('TARGET_CHANNEL', ''))
 TARGET_CHANNELS = [x.strip() for x in RAW_CHANNELS.split(',') if x.strip()]
@@ -107,37 +108,80 @@ signal.signal(signal.SIGTERM, handle_shutdown_signal)
 signal.signal(signal.SIGINT, handle_shutdown_signal)
 
 
-# --- MARKET HOURS & FRIDAY SQUARE OFF ---
+# --- BACKGROUND TASKS ---
+async def risk_monitor_task(client: TelegramClient, bridge: DhanBridge):
+    """
+    Checks P&L every 10 seconds.
+    If triggered, Sends Message -> Disconnects -> Terminates Program (Success Code 0).
+    """
+    logger.info(f'🛡️ Risk Monitor Started (Max Loss Limit: ₹{LOSS_LIMIT})')
+
+    while True:
+        try:
+            # Check kill switch logic
+            killed = bridge.check_kill_switch(loss_limit=LOSS_LIMIT)
+
+            if killed:
+                logger.critical('☠️ KILL SWITCH TRIGGERED! TERMINATING PROGRAM.')
+
+                if ADMIN_ID:
+                    try:
+                        await client.send_message(
+                            int(ADMIN_ID),
+                            f'🚨 **KILL SWITCH ACTIVATED** 🚨\n\n'
+                            f'Loss limit of ₹{LOSS_LIMIT} breached.\n'
+                            f'Positions closed & API disabled.\n'
+                            f'🔴 **Bot is shutting down now.**',
+                        )
+                    except Exception:
+                        pass
+
+                # Graceful disconnect
+                await client.disconnect()
+
+                # CRITICAL: Exit with 0 so Systemd does NOT restart it
+                logger.info('👋 Goodnight!')
+                sys.exit(0)
+
+        except Exception as e:
+            logger.error(f'Risk Monitor Error: {e}')
+            await asyncio.sleep(5)
+
+        await asyncio.sleep(10)
+
+
 async def check_market_hours(client: TelegramClient, bridge: DhanBridge):
     """
-    1. Checks for Friday 3:18 PM Square-off
-    2. Checks for Daily 3:30 PM Shutdown
+    1. Checks for Friday Square-off (15:18).
+    2. Checks for Daily Shutdown (15:30).
     """
-    stop_time = time(15, 30)  # 3:30 PM
+    stop_time = time(15, 30)
 
     logger.info('⏰ Market Monitor Started (Fri SqOff: 15:18 | Stop: 15:30)')
 
     while True:
         now = datetime.now()
 
-        # --- FRIDAY 15:18 CHECK ---
-        # now.weekday() == 4 means FRIDAY
-        if now.weekday() == 4:
+        # --- FRIDAY 15:18 LOGIC ---
+        if now.weekday() == 4:  # Friday
             if now.time().hour == 15 and now.time().minute == 18:
-                logger.warning('📅 It is Friday 3:18 PM! Triggering Auto-Square Off.')
+                logger.warning('📅 Friday 3:18 PM: Auto-Square Off Triggered.')
                 try:
                     bridge.square_off_all()
+                    if ADMIN_ID:
+                        await client.send_message(
+                            int(ADMIN_ID), '📅 **Friday Square-Off Executed**'
+                        )
                 except Exception as e:
                     logger.error(f'Square Off Failed: {e}')
 
-                # Sleep 65s so we don't trigger again in the same minute
-                await asyncio.sleep(65)
+                await asyncio.sleep(65)  # Avoid double trigger
 
-        # --- DAILY STOP CHECK ---
+        # --- DAILY SHUTDOWN ---
         if now.time() >= stop_time:
             logger.info('🛑 Market Closed (3:30 PM). Stopping Bot...')
-            await client.disconnect()  # pyright: ignore[reportGeneralTypeIssues]
-            return  # Clean exit from task
+            await client.disconnect()
+            return
 
         await asyncio.sleep(30)
 
@@ -151,16 +195,16 @@ async def resolve_channel(client: TelegramClient, target: str):
             entity = await client.get_entity(int(target))
             logger.info(f'Resolved by ID: {getattr(entity, "title", target)}')
             return entity
-        except Exception as e:
-            logger.debug(f'Failed to resolve by ID: {e}')
+        except Exception:
+            pass
 
     try:
         entity = await client.get_entity(target)
         title = getattr(entity, 'title', getattr(entity, 'username', target))
         logger.info(f'Resolved by username/entity: {title}')
         return entity
-    except Exception as e:
-        logger.debug(f'Failed to resolve by username: {e}')
+    except Exception:
+        pass
 
     logger.info(f"🔍 Searching dialogs for title: '{target}'...")
     async for d in client.iter_dialogs(limit=500):
@@ -232,7 +276,7 @@ class SignalBatcher:
 
 async def main():
     logger.info('=' * 60)
-    logger.info('🤖 Trading Bot Starting...')
+    logger.info('🤖 Trading Bot Starting (Features: ATR Trail, Risk Monitor, Friday SqOff)...')
     logger.info('=' * 60)
 
     if not TELEGRAM_API_ID or not TELEGRAM_API_HASH:
@@ -242,7 +286,7 @@ async def main():
         logger.critical('Missing TARGET_CHANNELS')
         return
 
-    logger.info('📋 Configuration loaded')
+    logger.info('Configuration loaded')
     logger.info(f'   - Channels: {len(TARGET_CHANNELS)}')
 
     logger.info('Initializing Dhan Bridge...')
@@ -262,11 +306,12 @@ async def main():
             api_id=int(TELEGRAM_API_ID),
             api_hash=TELEGRAM_API_HASH,
         )
-        await client.start()  # pyright: ignore[reportGeneralTypeIssues]
+        await client.start() # pyright: ignore[reportGeneralTypeIssues]
         logger.info('✅ Connected to Telegram')
 
-        # --- START MARKET MONITOR (Pass 'bridge' for Friday SqOff) ---
+        # --- START BACKGROUND TASKS ---
         asyncio.create_task(check_market_hours(client, bridge))
+        asyncio.create_task(risk_monitor_task(client, bridge))
 
     except Exception as e:
         logger.critical(f'Failed to connect to Telegram: {e}', exc_info=True)
@@ -274,13 +319,20 @@ async def main():
 
     resolved_chats = []
     logger.info('Resolving target channels...')
-    for target in TARGET_CHANNELS:
-        try:
-            entity = await resolve_channel(client, target)
-            resolved_chats.append(entity)
-            logger.info(f'Added listener for: {getattr(entity, "title", target)}')
-        except Exception as e:
-            logger.error(f"   Failed to resolve '{target}': {e}")
+
+    # WRAPPED IN TRY/EXCEPT to handle kill switch during startup
+    try:
+        for target in TARGET_CHANNELS:
+            try:
+                entity = await resolve_channel(client, target)
+                resolved_chats.append(entity)
+                logger.info(f'Added listener for: {getattr(entity, "title", target)}')
+            except Exception as e:
+                logger.error(f"   Failed to resolve '{target}': {e}")
+
+    except asyncio.CancelledError:
+        logger.info('🛑 Bot stopped during startup (Kill Switch active). Exiting.')
+        sys.exit(0)  # CLEAN EXIT
 
     if not resolved_chats:
         logger.critical('No channels resolved. Exiting.')
@@ -298,17 +350,28 @@ async def main():
 
                 if text == '/status':
                     funds = bridge.get_funds()
+                    pnl = bridge.get_total_pnl()
                     fund_str = f'₹{funds:.2f}' if funds is not None else 'Error'
-                    await event.reply(
-                        f'🤖 **Status**\n💰 Funds: {fund_str}\n🕒 {datetime.now().strftime("%H:%M:%S")}'
+                    pnl_str = f'₹{pnl:.2f}'
+
+                    msg = (
+                        f'🤖 **Bot Status**\n'
+                        f'💰 Funds: {fund_str}\n'
+                        f'📉 Day P&L: {pnl_str}\n'
+                        f'🛑 Loss Limit: ₹{LOSS_LIMIT}\n'
+                        f'🕒 {datetime.now().strftime("%H:%M:%S")}'
                     )
+                    await event.reply(msg)
 
                 elif text == '/logs':
                     await event.reply('📤 Uploading logs...')
                     files = [
                         f for f in ['logs/trade_logs.log', 'logs/errors.log'] if os.path.exists(f)
                     ]
-                    await event.reply(file=files) if files else await event.reply('⚠️ No logs.')
+                    if files:
+                        await event.reply(file=files)
+                    else:
+                        await event.reply('⚠️ No logs found.')
 
                 elif text == '/tail':
                     try:
@@ -318,7 +381,7 @@ async def main():
                     except Exception as e:
                         await event.reply(f'Error reading logs {e}')
 
-                elif text == '/force_sqoff':  # Emergency manual trigger
+                elif text == '/force_sqoff':
                     await event.reply('⚠️ Force Square-off Triggered!')
                     bridge.square_off_all()
 
@@ -340,7 +403,7 @@ async def main():
             logger.error(f'Handler Error: {e}', exc_info=True)
 
     try:
-        await client.run_until_disconnected()  # pyright: ignore[reportGeneralTypeIssues]
+        await client.run_until_disconnected() # pyright: ignore[reportGeneralTypeIssues]
     except Exception as e:
         logger.critical(f'Client disconnected: {e}', exc_info=True)
         raise
@@ -351,8 +414,10 @@ if __name__ == '__main__':
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info('Bot Stopped (Keyboard Interrupt)')
+    except asyncio.CancelledError:
+        logger.info('Bot Stopped (Task Cancelled)')
     except SystemExit:
-        pass
+        pass  # Clean exit
     except Exception as e:
         logger.critical(f'Critical Crash: {e}', exc_info=True)
         sys.exit(1)
