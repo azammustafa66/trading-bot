@@ -108,7 +108,7 @@ class DhanMapper:
                 return sec_id, exch, lot_size
 
             logger.warning(
-                f'ID Not Found for: {trading_symbol} (Checked NSE Only for Stocks)'
+                f'ID Not Found for: {trading_symbol}'
             )
             return '', '', -1
 

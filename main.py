@@ -19,7 +19,7 @@ LOG_BACKUP_COUNT = int(os.getenv('LOG_BACKUP_COUNT', '5'))
 os.makedirs('logs', exist_ok=True)
 
 file_handler = RotatingFileHandler(
-    'logs/trade_logs.log',
+    filename='logs/trade_logs.log',
     mode='a',
     maxBytes=MAX_LOG_SIZE,
     backupCount=LOG_BACKUP_COUNT,
@@ -33,7 +33,7 @@ file_handler.setFormatter(
 )
 
 error_handler = RotatingFileHandler(
-    'logs/errors.log',
+    filename='logs/errors.log',
     mode='a',
     maxBytes=MAX_LOG_SIZE,
     backupCount=LOG_BACKUP_COUNT,
@@ -88,7 +88,6 @@ TARGET_CHANNELS = [x.strip() for x in RAW_CHANNELS.split(',') if x.strip()]
 SIGNALS_JSONL = os.getenv('SIGNALS_JSONL', 'data/signals.jsonl')
 SIGNALS_JSON = os.getenv('SIGNALS_JSON', 'data/signals.json')
 
-# CRITICAL: Reduced to 2 seconds for faster trade execution
 BATCH_DELAY_SECONDS = 2.0
 
 os.makedirs('data', exist_ok=True)
@@ -126,8 +125,7 @@ async def check_market_hours(client: TelegramClient):
             await client.disconnect()  # pyright: ignore[reportGeneralTypeIssues]
             return
 
-        # Wait 60 seconds before checking again
-        await asyncio.sleep(60)
+        await asyncio.sleep(0.5 * 60 * 60)
 
 
 # --- HELPER FUNCTIONS ---
@@ -310,7 +308,7 @@ async def main():
             admin_id_int = int(ADMIN_ID)
             logger.info(f'🛡️ Admin Commands Enabled for User ID: {admin_id_int}')
 
-            @client.on(events.NewMessage(from_users=[admin_id_int]))
+            @client.on(event=events.NewMessage(from_users=[admin_id_int]))
             async def admin_handler(event):
                 text = event.raw_text.lower().strip()
 
