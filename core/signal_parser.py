@@ -12,13 +12,11 @@ from dotenv import load_dotenv
 
 # --- 1. Robust Import Setup ---
 try:
-    from utils.generate_expiry_dates import (select_expiry_date,
-                                             select_expiry_label)
+    from utils.generate_expiry_dates import select_expiry_date, select_expiry_label
 except ImportError:
     try:
         sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        from utils.generate_expiry_dates import (select_expiry_date,
-                                                 select_expiry_label)
+        from utils.generate_expiry_dates import select_expiry_date, select_expiry_label
     except ImportError:
         # Fallback dummy functions
         def select_expiry_date(underlying: str, reference_dt: Optional[datetime] = None) -> date:
@@ -338,7 +336,7 @@ def process_and_save(
     if os.path.exists(jsonl_path):
         try:
             with open(jsonl_path, 'r') as f:
-                existing = [json.loads(line) for line in f if line.strip()]
+                existing: List[Dict[str, Any]] = [json.loads(line) for line in f if line.strip()]
         except Exception as e:
             logger.info(msg=f'Failed to read existing signals: {e}')
 
@@ -378,7 +376,7 @@ def process_and_save(
 # --- 6. Robust Test Suite ---
 
 if __name__ == '__main__':
-    print(f'\n🧪 Running Test Suite [Time: {now_ist()}]')
+    print(f'\nRunning Test Suite [Time: {now_ist()}]')
 
     mock_now = datetime(2025, 12, 30, 10, 0, 0)
     if IST:

@@ -90,15 +90,15 @@ class DhanBridge:
         try:
             available_funds = self.get_funds() or 0
             risk_capital = math.ceil(
-                available_funds * 0.02 if is_positional else available_funds * 0.0125
+                available_funds * 0.02 if is_positional else available_funds * 0.015
             )
 
             sl_gap = abs(entry_price - sl_price)
-            if sl_gap < 1.0:
-                sl_gap = 1.0
+            if sl_gap <= 1.0:
+                return 0
 
             raw_qty = math.ceil(risk_capital / sl_gap)
-            num_lots = max(1, round(raw_qty / lot_size))
+            num_lots = max(1, math.ceil(raw_qty / lot_size))
             return math.ceil(num_lots * lot_size)
         except Exception:
             return lot_size
@@ -106,16 +106,16 @@ class DhanBridge:
     # --- UNIFIED ATR MODULE ---
     def fetch_atr(
         self, security_id: str, exchange_segment: str, symbol: str, is_positional: bool
-    ) -> float | None:
+    ) -> float:
         try:
             is_index = any(x in symbol.upper() for x in ['NIFTY', 'BANKNIFTY', 'SENSEX'])
             instrument_type = 'OPTIDX' if is_index else 'OPTSTK'
 
             if is_positional:
-                interval = 60  # 1 Hour
-                lookback_days = 15
+                interval = 15
+                lookback_days = 3
             else:
-                interval = 5  # 5 Min
+                interval = 5
                 lookback_days = 3
 
             to_date = datetime.now()
@@ -139,7 +139,7 @@ class DhanBridge:
                 lows = np.array(data['low'], dtype=float)
                 closes = np.array(data['close'], dtype=float)
 
-                atr_array = talib.ATR(highs, lows, closes, timeperiod=14)
+                atr_array = talib.ATR(highs, lows, closes)
                 current_atr = atr_array[-1]
 
                 if not np.isnan(current_atr) and current_atr > 0:
@@ -148,7 +148,7 @@ class DhanBridge:
         except Exception as e:
             logger.error(f'ATR Fetch Failed: {e}')
 
-        return None
+        return 0.0
 
     # --- POSITION & ORDER MANAGEMENT ---
     def cancel_all_pending_orders(self):
@@ -185,7 +185,7 @@ class DhanBridge:
             return []
 
     def square_off_all(self):
-        logger.info('🚨 SQUARE OFF SEQUENCE INITIATED 🚨')
+        logger.info('SQUARE OFF SEQUENCE INITIATED')
 
         # 1. Cancel Pending Orders First (Super Orders)
         self.cancel_all_pending_orders()
@@ -193,7 +193,7 @@ class DhanBridge:
         # 2. Close Positions
         positions = self.get_open_positions()
         if not positions:
-            logger.info('✅ No open positions.')
+            logger.info('No open positions.')
             return
 
         for pos in positions:
@@ -214,7 +214,7 @@ class DhanBridge:
                     'validity': 'DAY',
                 }
                 self.session.post(f'{self.base_url}/orders', json=payload, timeout=5)
-                logger.info(f'   🔻 CLOSED {pos.get("tradingSymbol")}: {action} {qty}')
+                logger.info(f'CLOSED {pos.get("tradingSymbol")}: {action} {qty}')
             except Exception as e:
                 logger.error(f'Failed to close {pos.get("tradingSymbol")}: {e}')
 
@@ -278,7 +278,7 @@ class DhanBridge:
             self.kill_switch_triggered = True  # <--- SET FLAG IMMEDIATELY
 
             logger.critical('=' * 60)
-            logger.critical(f'🛑 LOSS LIMIT BREACHED: {current_pnl} <= -{loss_limit}')
+            logger.critical(f'LOSS LIMIT BREACHED: {current_pnl} <= -{loss_limit}')
             logger.critical('=' * 60)
 
             # 1. Close Everything
@@ -295,20 +295,25 @@ class DhanBridge:
         return False
 
     # --- MAIN EXECUTION ---
-    def execute_super_order(self, signal: Dict[str, Any]):
+    def execute_super_order(self, signal: Dict[str, Any]) -> str:
         if not self.dhan:
             logger.warning('Dhan client not initialized')
-            return
+            return 'ERROR'
 
-        # [Logic remains same as previous turn, just ensuring it calls fetch_atr]
+        if self.kill_switch_triggered:
+            logger.warning('Kill Switch Active. Ignoring Signal.')
+            return 'ERROR'
+
         logger.info('=' * 60)
         logger.info('EXECUTING SUPER ORDER')
 
         try:
             sym = signal.get('underlying', '')
-            trade_sym = signal.get('trading_symbol')
-            action = signal.get('action')
+            trade_sym = signal.get('trading_symbol', '')
+            action = signal.get('action', '')
             is_positional = signal.get('is_positional', False)
+
+            # Safe float conversion
             entry_price = float(signal.get('trigger_above') or 0)
             sl_price = float(signal.get('stop_loss') or 0)
 
@@ -316,79 +321,78 @@ class DhanBridge:
 
             if not sec_id or lot_size == -1:
                 logger.error(f'Security ID not found for {trade_sym}')
-                return
+                return 'ERROR'
 
             exch_seg = 'BSE_FNO' if (exch_id == 'BSE' or sym == 'SENSEX') else 'NSE_FNO'
             current_ltp = self.get_ltp(sec_id, exch_seg)
             order_type = 'LIMIT'
 
-            # LTP Checks
+            # --- CLIENT SIDE TRIGGER LOGIC ---
             if current_ltp:
                 logger.info(f'LTP Check: {current_ltp} vs Entry {entry_price}')
+
                 if entry_price == 0:
                     entry_price = current_ltp
                     order_type = 'MARKET'
+
                 elif current_ltp > (entry_price * 1.05):
-                    logger.warning(f'Price {current_ltp} > 5% above entry. SKIPPING.')
-                    return
+                    logger.warning(f'Price {current_ltp} > 5% above entry. Waiting (PRICE_HIGH).')
+                    # FIXED: Added underscore to match main.py
+                    return 'PRICE_HIGH'
+
                 elif current_ltp >= entry_price:
-                    logger.info('Breakout confirmed. Switching to MARKET.')
+                    logger.info(f'Breakout! {current_ltp} >= {entry_price}. FIRE MARKET ORDER.')
                     order_type = 'MARKET'
+
                 else:
-                    logger.info(f'Price {current_ltp} < {entry_price}. Sending LIMIT.')
-                    order_type = 'LIMIT'
+                    logger.info(
+                        f'Price {current_ltp} < {entry_price}. Waiting for breakout (PRICE_LOW).'
+                    )
+                    # FIXED: Added underscore to match main.py
+                    return 'PRICE_LOW'
             else:
                 logger.error('Could not fetch LTP.')
-                return
+                return 'ERROR'
 
             anchor_price = entry_price if entry_price > 0 else current_ltp
-
-            # 1. Fetch ATR
             atr_val = self.fetch_atr(str(sec_id), exch_seg, sym, is_positional)
 
             # Fallback logic
             if anchor_price < 50:
-                fallback_sl_pts = 5.0
-                fallback_trail = 0.5
+                fallback_sl_pts, fallback_trail = 5.0, 0.5
             elif 50 <= anchor_price < 150:
-                fallback_sl_pts = 15.0
-                fallback_trail = 2.0
+                fallback_sl_pts, fallback_trail = 15.0, 2.0
             elif 150 <= anchor_price < 500:
-                fallback_sl_pts = 30.0
-                fallback_trail = 5.0
+                fallback_sl_pts, fallback_trail = 30.0, 5.0
             else:
-                fallback_sl_pts = 50.0
-                fallback_trail = 10.0
+                fallback_sl_pts, fallback_trail = 50.0, 10.0
 
-            if is_positional:
-                sl_mult, trail_mult = 3.0, 2.5
-            else:
-                sl_mult, trail_mult = 2.0, 1.5
+            sl_mult = 2.25
+            trail_mult = 1.75 if is_positional else 1.5
+            trailing_jump = 0.0
 
             if atr_val:
-                trailing_jump = atr_val * trail_mult
+                trailing_jump = math.ceil((atr_val * trail_mult))
             else:
                 trailing_jump = fallback_trail
 
             if sl_price == 0:
                 raw_text = signal.get('raw', '').upper()
                 if 'HERO' in raw_text:
-                    sl_price = 0.05
+                    sl_price = 5.0
                 elif atr_val:
                     sl_price = anchor_price - (atr_val * sl_mult)
                 else:
                     sl_price = anchor_price - fallback_sl_pts
 
-            # Finalize Prices
-            sl_price = max(sl_price, 0.05)
+            sl_price = max(sl_price, 5.0)
             if action == 'BUY' and sl_price >= anchor_price:
-                sl_price = max(anchor_price - 1.0, 0.05)
+                sl_price = max(anchor_price - 1.0, 5.0)
 
-            trailing_jump = self.round_to_tick(trailing_jump)
+            trailing_jump = math.ceil(self.round_to_tick(trailing_jump))
             target_price = self.round_to_tick(entry_price * 10.0)
-            sl_price = self.round_to_tick(sl_price)
-            trigger_price = self.round_to_tick(entry_price) if order_type == 'LIMIT' else 0.0
-            price_to_send = self.round_to_tick(entry_price + 0.5) if order_type == 'LIMIT' else 0.0
+            sl_price = math.floor(self.round_to_tick(sl_price))
+            price_to_send = self.round_to_tick(entry_price) if order_type == 'LIMIT' else 0.0
 
             qty = self.calculate_quantity(entry_price, sl_price, is_positional, lot_size)
             product_type = 'MARGIN' if is_positional else 'INTRADAY'
@@ -396,14 +400,14 @@ class DhanBridge:
             payload = {
                 'dhanClientId': self.client_id,
                 'correlationId': f'BOT-{int(datetime.now().timestamp())}',
-                'transactionType': 'BUY' if action == 'BUY' else 'SELL',
+                'transactionType': 'BUY',
                 'exchangeSegment': exch_seg,
                 'productType': product_type,
                 'orderType': order_type,
                 'securityId': str(sec_id),
                 'quantity': int(qty),
                 'price': float(price_to_send),
-                'triggerPrice': float(trigger_price),
+                'triggerPrice': 0.0,
                 'validity': 'DAY',
                 'targetPrice': float(target_price),
                 'stopLossPrice': float(sl_price),
@@ -422,8 +426,11 @@ class DhanBridge:
                 'TRANSIT',
             ]:
                 logger.info(f'SUCCESS: Order ID {data.get("orderId")}')
+                return 'SUCCESS'
             else:
                 logger.error(f'FAILED: {data}')
+                return 'ERROR'
 
         except Exception as e:
             logger.critical(f'Order Execution Error: {e}', exc_info=True)
+            return 'ERROR'
