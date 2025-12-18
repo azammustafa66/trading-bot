@@ -3,7 +3,7 @@ import math
 import os
 import time
 from datetime import datetime, timedelta
-from typing import Any, Dict
+from typing import Any, Dict, Optional, List
 
 import numpy as np
 import requests
@@ -13,12 +13,34 @@ from dotenv import load_dotenv
 
 from core.dhan_mapper import DhanMapper
 
+# Setup Logger
 logger = logging.getLogger('DhanBridge')
 load_dotenv()
 
 
 class DhanBridge:
+    # --- CONFIGURATION CONSTANTS ---
+    # Risk Management
+    RISK_PER_TRADE_POSITIONAL = 0.02  # 2% of capital
+    RISK_PER_TRADE_INTRADAY = 0.015  # 1.5% of capital
+    MIN_SL_POINTS = 5.0
+
+    # ATR & Technicals
+    ATR_PERIOD = 14
+    ATR_LOOKBACK_DAYS_POS = 3
+    ATR_LOOKBACK_DAYS_INTRA = 3
+    ATR_INTERVAL_POS = 15
+    ATR_INTERVAL_INTRA = 5
+
+    # Multipliers
+    SL_MULTIPLIER = 3.0
+    TRAIL_MULTIPLIER_POS = 2.0
+    TRAIL_MULTIPLIER_INTRA = 1.5
+    TARGET_RR_RATIO_POS = 5.0
+    TARGET_RR_RATIO_INTRA = 4.0
+
     def __init__(self):
+        """Initializes Dhan client, session, and mapper."""
         self.client_id = os.getenv('DHAN_CLIENT_ID')
         self.access_token = os.getenv('DHAN_ACCESS_TOKEN')
         self.base_url = 'https://api.dhan.co/v2'
@@ -43,118 +65,109 @@ class DhanBridge:
 
     @staticmethod
     def round_to_tick(price: float, tick: float = 0.05) -> float:
+        """Rounds price to the nearest tick size."""
         return round(round(price / tick) * tick, 2)
 
-    def get_funds(self) -> float | None:
+    def get_funds(self) -> float:
+        """Fetches available fund limit from Dhan."""
         if not self.access_token:
-            return None
+            return 0.0
         try:
-            url = f'{self.base_url}/fundlimit'
-            response = self.session.get(url=url, timeout=10)
-            data = response.json()
-            return float(data.get('sodLimit', 0.0))
+            response = self.session.get(f'{self.base_url}/fundlimit', timeout=5)
+            return float(response.json().get('sodLimit', 0.0))
         except Exception as e:
-            logger.error(f'Failure in fetching funds: {e}')
-            return None
+            logger.error(f'Fund Fetch Error: {e}')
+            return 0.0
 
-    def get_ltp(self, security_id: str, exchange_segment: str) -> float | None:
+    def get_ltp(self, security_id: str, exchange_segment: str) -> Optional[float]:
+        """Fetches the Last Traded Price (LTP) for a security."""
         if not self.access_token:
             return None
         try:
-            url = f'{self.base_url}/marketfeed/ltp'
             payload = {exchange_segment: [int(security_id)]}
-
             if exchange_segment == 'BSE_FNO':
                 payload['BSE'] = [int(security_id)]
 
-            response = self.session.post(url, json=payload, timeout=5)
+            response = self.session.post(f'{self.base_url}/marketfeed/ltp', json=payload, timeout=5)
             data = response.json()
 
             if not data.get('data'):
                 return None
 
             str_id = str(security_id)
-            for seg, items in data['data'].items():
+            for _, items in data['data'].items():
                 if str_id in items:
-                    price = float(items[str_id].get('last_price', 0))
-                    if price > 0:
-                        return price
+                    return float(items[str_id].get('last_price', 0))
             return None
         except Exception as e:
-            logger.error(f'Something went wrong while fetching LTP {e}')
+            logger.error(f'LTP Fetch Error: {e}')
             return None
 
     def calculate_quantity(
-        self, entry_price: float, sl_price: float, is_positional: bool, lot_size: int
+        self, entry: float, sl: float, is_positional: bool, lot_size: int
     ) -> int:
+        """Calculates position size based on risk percentage and available funds."""
         try:
-            available_funds = self.get_funds() or 0
-            risk_capital = math.ceil(
-                available_funds * 0.02 if is_positional else available_funds * 0.015
+            funds = self.get_funds()
+            risk_pct = (
+                self.RISK_PER_TRADE_POSITIONAL if is_positional else self.RISK_PER_TRADE_INTRADAY
             )
+            risk_capital = math.ceil(funds * risk_pct)
 
-            sl_gap = abs(entry_price - sl_price)
+            sl_gap = abs(entry - sl)
             if sl_gap <= 1.0:
                 return 0
 
             raw_qty = math.ceil(risk_capital / sl_gap)
             num_lots = max(1, math.ceil(raw_qty / lot_size))
-            return math.ceil(num_lots * lot_size)
+            return int(num_lots * lot_size)
         except Exception:
             return lot_size
 
-    # --- UNIFIED ATR MODULE ---
-    def fetch_atr(
-        self, security_id: str, exchange_segment: str, symbol: str, is_positional: bool
-    ) -> float:
+    # --- TECHNICALS ---
+    def fetch_atr(self, sec_id: str, segment: str, symbol: str, is_positional: bool) -> float:
+        """Calculates ATR for dynamic SL and Target."""
         try:
             is_index = any(x in symbol.upper() for x in ['NIFTY', 'BANKNIFTY', 'SENSEX'])
-            instrument_type = 'OPTIDX' if is_index else 'OPTSTK'
+            inst_type = 'OPTIDX' if is_index else 'OPTSTK'
 
-            if is_positional:
-                interval = 15
-                lookback_days = 3
-            else:
-                interval = 5
-                lookback_days = 3
+            interval = self.ATR_INTERVAL_POS if is_positional else self.ATR_INTERVAL_INTRA
+            lookback = self.ATR_LOOKBACK_DAYS_POS if is_positional else self.ATR_LOOKBACK_DAYS_INTRA
 
             to_date = datetime.now()
-            from_date = to_date - timedelta(days=lookback_days)
+            from_date = to_date - timedelta(days=lookback)
 
-            url = f'{self.base_url}/charts/intraday'
             payload = {
-                'securityId': str(security_id),
-                'exchangeSegment': exchange_segment,
-                'instrument': instrument_type,
+                'securityId': str(sec_id),
+                'exchangeSegment': segment,
+                'instrument': inst_type,
                 'interval': interval,
                 'fromDate': from_date.strftime('%Y-%m-%d'),
                 'toDate': to_date.strftime('%Y-%m-%d'),
             }
 
-            response = self.session.post(url, json=payload, timeout=4)
+            response = self.session.post(
+                f'{self.base_url}/charts/intraday', json=payload, timeout=4
+            )
             data = response.json()
 
-            if data and 'high' in data and len(data['high']) > 15:
+            if data and 'high' in data and len(data['high']) > self.ATR_PERIOD:
                 highs = np.array(data['high'], dtype=float)
                 lows = np.array(data['low'], dtype=float)
                 closes = np.array(data['close'], dtype=float)
 
-                atr_array = talib.ATR(highs, lows, closes)
-                current_atr = atr_array[-1]
-
-                if not np.isnan(current_atr) and current_atr > 0:
-                    return float(current_atr)
+                atr = talib.ATR(highs, lows, closes, timeperiod=self.ATR_PERIOD)[-1]
+                return float(atr) if not np.isnan(atr) else 0.0
 
         except Exception as e:
-            logger.error(f'ATR Fetch Failed: {e}')
-
+            logger.error(f'ATR Error: {e}')
         return 0.0
 
-    # --- POSITION & ORDER MANAGEMENT ---
+    # --- ORDER MANAGEMENT ---
     def cancel_all_pending_orders(self):
+        """Cancels all open orders to prevent unintended executions."""
         try:
-            url = f'{self.base_url}/orders'
-            response = self.session.get(url, timeout=10)
+            response = self.session.get(f'{self.base_url}/orders', timeout=10)
             orders = response.json()
             if not isinstance(orders, list):
                 return
@@ -162,19 +175,18 @@ class DhanBridge:
             pending = [
                 o for o in orders if o.get('orderStatus') in ['PENDING', 'TRANSIT', 'PART_TRADED']
             ]
-            if not pending:
-                return
 
-            logger.info(f'⚠️ Cancelling {len(pending)} pending orders...')
-            for o in pending:
-                self.session.delete(f'{self.base_url}/orders/{o["orderId"]}', timeout=5)
+            if pending:
+                logger.info(f'Cancelling {len(pending)} pending orders...')
+                for o in pending:
+                    self.session.delete(f'{self.base_url}/orders/{o["orderId"]}', timeout=5)
         except Exception:
             pass
 
-    def get_open_positions(self):
+    def get_open_positions(self) -> List[Dict[str, Any]]:
+        """Fetches active open positions."""
         try:
-            url = f'{self.base_url}/positions'
-            response = self.session.get(url, timeout=10)
+            response = self.session.get(f'{self.base_url}/positions', timeout=10)
             data = response.json()
             if not isinstance(data, list):
                 return []
@@ -185,26 +197,27 @@ class DhanBridge:
             return []
 
     def square_off_all(self):
-        logger.info('SQUARE OFF SEQUENCE INITIATED')
-
-        # 1. Cancel Pending Orders First (Super Orders)
+        """Emergency function to close all positions and cancel orders."""
+        logger.info('SQUARE OFF INITIATED')
         self.cancel_all_pending_orders()
 
-        # 2. Close Positions
-        positions = self.get_open_positions()
-        if not positions:
-            logger.info('No open positions.')
-            return
+        try:
+            positions = self.get_open_positions()
+            if not positions:
+                logger.info('No open positions.')
+                return
 
-        for pos in positions:
-            try:
+            for pos in positions:
                 net_qty = pos.get('netQty', 0)
+                if net_qty == 0:
+                    continue
+
                 action = 'SELL' if net_qty > 0 else 'BUY'
                 qty = abs(net_qty)
 
                 payload = {
                     'dhanClientId': self.client_id,
-                    'correlationId': f'SQOFF-{int(datetime.now().timestamp())}',
+                    'correlationId': f'SQOFF-{int(time.time())}',
                     'transactionType': action,
                     'exchangeSegment': pos.get('exchangeSegment'),
                     'productType': pos.get('productType'),
@@ -214,195 +227,160 @@ class DhanBridge:
                     'validity': 'DAY',
                 }
                 self.session.post(f'{self.base_url}/orders', json=payload, timeout=5)
-                logger.info(f'CLOSED {pos.get("tradingSymbol")}: {action} {qty}')
-            except Exception as e:
-                logger.error(f'Failed to close {pos.get("tradingSymbol")}: {e}')
+                logger.info(f'Closed {pos.get("tradingSymbol")}: {action} {qty}')
 
-    # --- KILL SWITCH MODULE ---
+        except Exception as e:
+            logger.error(f'Square Off Failed: {e}')
+
+    # --- KILL SWITCH ---
     def get_total_pnl(self) -> float:
-        """
-        Calculates Total Day P&L (Realized + Unrealized) from positions.
-        """
+        """Calculates realized + unrealized PnL for the day."""
         try:
-            url = f'{self.base_url}/positions'
-            response = self.session.get(url, timeout=5)
-            data = response.json()
-
+            data = self.session.get(f'{self.base_url}/positions', timeout=5).json()
             if not isinstance(data, list):
                 return 0.0
 
-            total_pnl = 0.0
-            for p in data:
-                realized = float(p.get('realizedProfit', 0.0))
-                unrealized = float(p.get('unrealizedProfit', 0.0))
-                total_pnl += realized + unrealized
-
-            return total_pnl
-        except Exception as e:
-            logger.error(f'Error fetching PnL: {e}')
+            return sum(
+                float(p.get('realizedProfit', 0)) + float(p.get('unrealizedProfit', 0))
+                for p in data
+            )
+        except Exception:
             return 0.0
 
-    def activate_kill_switch(self):
-        """
-        Activates Kill Switch via API.
-        Requires all positions to be closed first.
-        """
-        logger.critical('ACTIVATING KILL SWITCH')
-        try:
-            url = f'{self.base_url}/killswitch?killSwitchStatus=ACTIVATE'
-            response = self.session.post(url, timeout=10)
-
-            if response.status_code == 200:
-                logger.info(f'KILL SWITCH ACTIVATED: {response.json()}')
-                return True
-            else:
-                logger.error(f'Kill Switch Failed: {response.text}')
-                return False
-        except Exception as e:
-            logger.error(f'Kill Switch Exception: {e}')
-            return False
-
     def check_kill_switch(self, loss_limit: float = 8000.0) -> bool:
-        """
-        Checks P&L. If loss >= limit:
-        1. Squares off positions
-        2. Activates Kill Switch
-        3. Returns True (Signal to stop bot)
-        """
+        """Checks if PnL breaches limit; triggers Square Off & Kill Switch if true."""
         if self.kill_switch_triggered:
             return True
 
-        current_pnl = self.get_total_pnl()
+        pnl = self.get_total_pnl()
+        if pnl <= -abs(loss_limit):
+            self.kill_switch_triggered = True
+            logger.critical(f'LOSS LIMIT BREACHED: {pnl} <= -{loss_limit}')
 
-        if current_pnl <= -abs(loss_limit):
-            self.kill_switch_triggered = True  # <--- SET FLAG IMMEDIATELY
-
-            logger.critical('=' * 60)
-            logger.critical(f'LOSS LIMIT BREACHED: {current_pnl} <= -{loss_limit}')
-            logger.critical('=' * 60)
-
-            # 1. Close Everything
             self.square_off_all()
-
-            # 2. Wait for executions
             time.sleep(2)
 
-            # 3. Activate Kill Switch
-            self.activate_kill_switch()
+            try:
+                self.session.post(
+                    f'{self.base_url}/killswitch?killSwitchStatus=ACTIVATE', timeout=10
+                )
+                logger.info('KILL SWITCH ACTIVATED ON BROKER')
+            except Exception as e:
+                logger.error(f'Kill Switch API Failed: {e}')
 
             return True
-
         return False
 
-    # --- MAIN EXECUTION ---
+    # --- EXECUTION LOGIC ---
     def execute_super_order(self, signal: Dict[str, Any]) -> str:
+        """Parses signal, calculates safe SL/Target, and executes Bracket Order."""
         if not self.dhan:
-            logger.warning('Dhan client not initialized')
             return 'ERROR'
-
         if self.kill_switch_triggered:
-            logger.warning('Kill Switch Active. Ignoring Signal.')
             return 'ERROR'
 
         logger.info('=' * 60)
         logger.info('EXECUTING SUPER ORDER')
 
         try:
+            # 1. Parse Signal
             sym = signal.get('underlying', '')
             trade_sym = signal.get('trading_symbol', '')
-            action = signal.get('action', '')
-            is_positional = signal.get('is_positional', False)
-
-            # Safe float conversion
-            entry_price = float(signal.get('trigger_above') or 0)
+            action = signal.get('action', 'BUY')
+            is_pos = signal.get('is_positional', False)
+            entry = float(signal.get('trigger_above') or 0)
             sl_price = float(signal.get('stop_loss') or 0)
+            raw_target = float(signal.get('target') or 0)
 
+            # 2. Map Security
             sec_id, exch_id, lot_size = self.mapper.get_security_id(trade_sym)
-
             if not sec_id or lot_size == -1:
-                logger.error(f'Security ID not found for {trade_sym}')
+                logger.error(f'Security ID Not Found: {trade_sym}')
                 return 'ERROR'
 
             exch_seg = 'BSE_FNO' if (exch_id == 'BSE' or sym == 'SENSEX') else 'NSE_FNO'
-            current_ltp = self.get_ltp(sec_id, exch_seg)
-            order_type = 'LIMIT'
 
-            # --- CLIENT SIDE TRIGGER LOGIC ---
-            if current_ltp:
-                logger.info(f'LTP Check: {current_ltp} vs Entry {entry_price}')
-
-                if entry_price == 0:
-                    entry_price = current_ltp
-                    order_type = 'MARKET'
-
-                elif current_ltp > (entry_price * 1.05):
-                    logger.warning(f'Price {current_ltp} > 5% above entry. Waiting (PRICE_HIGH).')
-                    # FIXED: Added underscore to match main.py
-                    return 'PRICE_HIGH'
-
-                elif current_ltp >= entry_price:
-                    logger.info(f'Breakout! {current_ltp} >= {entry_price}. FIRE MARKET ORDER.')
-                    order_type = 'MARKET'
-
-                else:
-                    logger.info(
-                        f'Price {current_ltp} < {entry_price}. Waiting for breakout (PRICE_LOW).'
-                    )
-                    # FIXED: Added underscore to match main.py
-                    return 'PRICE_LOW'
-            else:
-                logger.error('Could not fetch LTP.')
+            # 3. LTP & Entry Logic
+            ltp = self.get_ltp(sec_id, exch_seg)
+            if not ltp:
+                logger.error('Could not fetch LTP')
                 return 'ERROR'
 
-            anchor_price = entry_price if entry_price > 0 else current_ltp
-            atr_val = self.fetch_atr(str(sec_id), exch_seg, sym, is_positional)
+            logger.info(f'Entry Check: LTP {ltp} vs Trigger {entry}')
 
-            # Fallback logic
-            if anchor_price < 50:
-                fallback_sl_pts, fallback_trail = 5.0, 0.5
-            elif 50 <= anchor_price < 150:
-                fallback_sl_pts, fallback_trail = 15.0, 2.0
-            elif 150 <= anchor_price < 500:
-                fallback_sl_pts, fallback_trail = 30.0, 5.0
+            order_type = 'LIMIT'
+            if entry == 0:
+                entry = ltp
+                order_type = 'MARKET'
+            elif ltp > (entry * 1.05):
+                logger.warning('Price High (>5%). Waiting for pullback.')
+                return 'PRICE_HIGH'
+            elif ltp >= entry:
+                logger.info('Breakout Triggered! Switching to MARKET.')
+                order_type = 'MARKET'
             else:
-                fallback_sl_pts, fallback_trail = 50.0, 10.0
+                logger.info('Waiting for breakout.')
+                return 'PRICE_LOW'
 
-            sl_mult = 2.25
-            trail_mult = 1.75 if is_positional else 1.5
-            trailing_jump = 0.0
+            anchor = entry if entry > 0 else ltp
 
-            if atr_val:
-                trailing_jump = math.ceil((atr_val * trail_mult))
+            # 4. Technical Calculations (ATR & Fallbacks)
+            atr = self.fetch_atr(str(sec_id), exch_seg, sym, is_pos)
+
+            # Define Price-Based Fallbacks
+            if anchor < 50:
+                fb_sl, fb_trail = 5.0, 0.5
+            elif anchor < 150:
+                fb_sl, fb_trail = 15.0, 2.0
+            elif anchor < 500:
+                fb_sl, fb_trail = 30.0, 5.0
             else:
-                trailing_jump = fallback_trail
+                fb_sl, fb_trail = 50.0, 10.0
+
+            # 5. Calculate Stop Loss & Trail
+            trail_mult = self.TRAIL_MULTIPLIER_POS if is_pos else self.TRAIL_MULTIPLIER_INTRA
+            trailing_jump = max((atr * trail_mult) if atr else fb_trail, fb_trail)
 
             if sl_price == 0:
-                raw_text = signal.get('raw', '').upper()
-                if 'HERO' in raw_text:
+                if 'HERO' in signal.get('raw', '').upper():
                     sl_price = 5.0
-                elif atr_val:
-                    sl_price = anchor_price - (atr_val * sl_mult)
                 else:
-                    sl_price = anchor_price - fallback_sl_pts
+                    sl_dist = (atr * self.SL_MULTIPLIER) if atr else fb_sl
+                    sl_price = anchor - sl_dist
 
-            sl_price = max(sl_price, 5.0)
-            if action == 'BUY' and sl_price >= anchor_price:
-                sl_price = max(anchor_price - 1.0, 5.0)
+            # Clamp SL to ensure it's valid
+            sl_price = max(sl_price, anchor - fb_sl, 5.0)
+            if action == 'BUY' and sl_price >= anchor:
+                sl_price = max(anchor - 1.0, 5.0)
 
-            trailing_jump = math.ceil(self.round_to_tick(trailing_jump))
-            target_price = self.round_to_tick(entry_price * 10.0)
+            sl_dist = abs(anchor - sl_price)
+
+            # 6. Calculate Target (Dynamic RR)
+            target_price = 0.0
+            if raw_target > 0:
+                target_price = raw_target
+            else:
+                # Fallback Logic
+                rr_mult = self.TARGET_RR_RATIO_POS if is_pos else self.TARGET_RR_RATIO_INTRA
+                tgt_dist = max(rr_mult * sl_dist, 10.0 * atr) if atr else (5.0 * sl_dist)
+                target_price = anchor + tgt_dist
+
+            # 7. Rounding & Quantity
+            trailing_jump = self.round_to_tick(trailing_jump)
             sl_price = math.floor(self.round_to_tick(sl_price))
-            price_to_send = self.round_to_tick(entry_price) if order_type == 'LIMIT' else 0.0
+            target_price = self.round_to_tick(target_price)
+            price_to_send = self.round_to_tick(entry) if order_type == 'LIMIT' else 0.0
 
-            qty = self.calculate_quantity(entry_price, sl_price, is_positional, lot_size)
-            product_type = 'MARGIN' if is_positional else 'INTRADAY'
+            qty = self.calculate_quantity(entry, sl_price, is_pos, lot_size)
+            prod_type = 'MARGIN' if is_pos else 'INTRADAY'
 
+            # 8. Send Order
             payload = {
                 'dhanClientId': self.client_id,
-                'correlationId': f'BOT-{int(datetime.now().timestamp())}',
+                'correlationId': f'BOT-{int(time.time())}',
                 'transactionType': 'BUY',
                 'exchangeSegment': exch_seg,
-                'productType': product_type,
+                'productType': prod_type,
                 'orderType': order_type,
                 'securityId': str(sec_id),
                 'quantity': int(qty),
@@ -414,10 +392,9 @@ class DhanBridge:
                 'trailingJump': float(trailing_jump),
             }
 
-            logger.info(f'SENDING {order_type} | Trail: {trailing_jump} | SL: {sl_price}')
+            logger.info(f'Sending {order_type} | Qty: {qty} | TGT: {target_price} | SL: {sl_price}')
 
-            url = f'{self.base_url}/super/orders'
-            response = self.session.post(url, json=payload, timeout=10)
+            response = self.session.post(f'{self.base_url}/super/orders', json=payload, timeout=10)
             data = response.json()
 
             if response.status_code in [200, 201] and data.get('orderStatus') in [
@@ -432,5 +409,5 @@ class DhanBridge:
                 return 'ERROR'
 
         except Exception as e:
-            logger.critical(f'Order Execution Error: {e}', exc_info=True)
+            logger.critical(f'Execution Exception: {e}', exc_info=True)
             return 'ERROR'

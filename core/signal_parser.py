@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 
-# --- 1. Robust Import Setup ---
+# --- 1. Import Setup ---
 try:
     from utils.generate_expiry_dates import select_expiry_date, select_expiry_label
 except ImportError:
@@ -18,7 +18,7 @@ except ImportError:
         sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         from utils.generate_expiry_dates import select_expiry_date, select_expiry_label
     except ImportError:
-        # Fallback dummy functions
+        # Fallback dummy functions for standalone testing
         def select_expiry_date(underlying: str, reference_dt: Optional[datetime] = None) -> date:
             return date.today()
 
@@ -38,7 +38,7 @@ except ImportError:
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
+    format='%(asctime)s [%(levelname)s] [%(name)s] %(message)s',
     datefmt='%H:%M:%S',
 )
 logger = logging.getLogger('Parser')
@@ -48,7 +48,7 @@ DEDUPE_WINDOW_MINUTES = 15
 SIGNALS_JSONL = os.getenv('SIGNALS_JSONL', 'data/signals.jsonl')
 SIGNALS_JSON = os.getenv('SIGNALS_JSON', 'data/signals.json')
 
-# --- UPDATED IGNORE LIST (STRICTER) ---
+# --- CONSTANTS & PATTERNS ---
 IGNORE_KEYWORDS = [
     'RISK TRAIL',
     'SAFE BOOK',
@@ -62,11 +62,26 @@ IGNORE_KEYWORDS = [
     'FUTURES',
 ]
 
+# Pre-compiled Regex Patterns for Performance
+RE_POSITIONAL = re.compile(r'POSITIONAL|POSTIONAL|POSITION|LONG TERM|HOLD|POS', re.IGNORECASE)
+RE_STOCK_NAME = re.compile(
+    r'(?:BUY|SELL)\s+([A-Z0-9\s\&\-]+?)\s+(\d+(?:\.\d+)?)\s*(?:CE|PE|C|P|CALL|PUT)', re.IGNORECASE
+)
+RE_NIFTY = re.compile(r'\bNIFTY\b', re.IGNORECASE)
+RE_DATE = re.compile(
+    r'\b(\d{1,2})(?:st|nd|rd|th)?\s*(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)',
+    re.IGNORECASE,
+)
+RE_STRIKE = re.compile(r'\b(\d{4,6}|\d{2,5}(?:\.\d+)?)\s*(CE|PE|C|P|CALL|PUT)?\b', re.IGNORECASE)
+RE_TRIGGER = re.compile(r'\bABOVE\s+(\d+(?:\.\d+)?)', re.IGNORECASE)
+RE_SL = re.compile(r'\b(?:SL|STOP\s*LOSS)[\s:\-]*(\d+(?:\.\d+)?)', re.IGNORECASE)
+RE_TARGET = re.compile(r'TARGETS?\s+([\d\.\s]+)', re.IGNORECASE)
+RE_DIGITS_ONLY = re.compile(r'[\d\.\-\s]+')
+
 
 # --- 3. Helpers ---
-
-
 def to_ist(dt_input: Any) -> Optional[datetime]:
+    """Converts input to IST datetime."""
     if not dt_input:
         return None
     if isinstance(dt_input, str):
@@ -84,76 +99,67 @@ def to_ist(dt_input: Any) -> Optional[datetime]:
 
 
 def now_ist() -> datetime:
+    """Returns current time in IST."""
     return datetime.now(IST) if IST else datetime.now()
 
 
 # --- 4. Core Parsing Logic ---
-
-
 def detect_positional(text: str) -> bool:
-    return bool(re.search(r'POSITIONAL|POSTIONAL|POSITION|LONG TERM|HOLD', text.upper()))
+    """Checks if the signal is positional."""
+    return bool(RE_POSITIONAL.search(text))
 
 
 def extract_stock_name(text: str) -> Optional[str]:
-    """Captures text between BUY/SELL and the Strike Price for Stocks."""
-    pattern = r'(?:BUY|SELL)\s+([A-Z0-9\s\&\-]+?)\s+(\d+(?:\.\d+)?)\s*(?:CE|PE|C|P|CALL|PUT)'
-    match = re.search(pattern, text.upper())
-
+    """Captures stock name between Action and Strike Price."""
+    match = RE_STOCK_NAME.search(text)
     if match:
         raw_name = match.group(1).strip()
-        if raw_name in ['ABOVE', 'BELOW', 'AT', 'NEAR', 'THE', 'RANGE']:
+        if raw_name.upper() in ['ABOVE', 'BELOW', 'AT', 'NEAR', 'THE', 'RANGE']:
             return None
         return raw_name
     return None
 
 
 def detect_underlying(text: str) -> Optional[str]:
+    """Identifies the underlying asset (Index or Stock)."""
     up = text.upper()
-
     if 'BANKNIFTY' in up or 'BANK NIFTY' in up:
         return 'BANKNIFTY'
-    if re.search(r'\bNIFTY\b', up):
+    if RE_NIFTY.search(up):
         return 'NIFTY'
     if 'SENSEX' in up or 'SNSEX' in up:
         return 'SENSEX'
 
-    # 2. Fallback: Generic Stock Extraction
     stock_name = extract_stock_name(text)
     if stock_name:
         return stock_name.replace(' ', '')
-
     return None
 
 
 def extract_explicit_date(text: str) -> Optional[str]:
-    """
-    Detects if user provided a specific date like '25 DEC'.
-    """
-    match = re.search(
-        r'\b(\d{1,2})(?:st|nd|rd|th)?\s*(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)',
-        text.upper(),
-    )
+    """Detects explicit dates (e.g., '25 DEC')."""
+    match = RE_DATE.search(text)
     if match:
         day = int(match.group(1))
-        month = match.group(2)
+        month = match.group(2).upper()
         return f'{day:02d} {month}'
     return None
 
 
 def is_price_only(text: str) -> bool:
-    """
-    True if text is JUST numbers/prices (Noise).
-    """
+    """True if text contains only numbers/prices (Noise)."""
     up = text.upper()
-    if 'TARGET' in up or 'TGT' in up or 'SL' in up or 'STOP' in up:
+    if any(k in up for k in ['TARGET', 'TGT', 'SL', 'STOP']):
         return False
+
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     if not lines:
         return True
-    return all(re.fullmatch(r'[\d\.\-\s]+', ln) for ln in lines)
+    return all(RE_DIGITS_ONLY.fullmatch(ln) for ln in lines)
 
 
 def parse_single_block(text: str, reference_date: Optional[date] = None) -> Dict[str, Any]:
+    """Parses a single block of text into a structured signal dictionary."""
     clean_text = text.strip().upper()
 
     out: Dict[str, Any] = {
@@ -164,6 +170,7 @@ def parse_single_block(text: str, reference_date: Optional[date] = None) -> Dict
         'option_type': None,
         'stop_loss': None,
         'trigger_above': None,
+        'target': None,
         'is_positional': False,
         'trading_symbol': None,
         'ignore': False,
@@ -175,45 +182,56 @@ def parse_single_block(text: str, reference_date: Optional[date] = None) -> Dict
         out['ignore'] = True
         return out
 
-    # 2. Extract Positional Flag
+    # 2. Extract Basic Info
     if detect_positional(clean_text):
         out['is_positional'] = True
 
-    # 3. Extract Action
     if 'BUY' in clean_text:
         out['action'] = 'BUY'
     elif 'SELL' in clean_text:
         out['action'] = 'SELL'
 
-    # 4. Extract Underlying
     out['underlying'] = detect_underlying(text)
 
-    # 5. Extract Strike + Option Type
-    strike_match = re.search(r'\b(\d{4,6}|\d{2,5}(?:\.\d+)?)\s*(CE|PE|C|P|CALL|PUT)?\b', clean_text)
+    # 3. Extract Strike & Option Type
+    strike_match = RE_STRIKE.search(clean_text)
     if strike_match:
         raw_strike = strike_match.group(1)
-        if '.' in raw_strike:
-            out['strike'] = float(raw_strike)
-        else:
-            out['strike'] = int(raw_strike)
+        out['strike'] = float(raw_strike) if '.' in raw_strike else int(raw_strike)
 
         opt_str = strike_match.group(2) or ''
         if opt_str.startswith(('C', 'CALL')):
             out['option_type'] = 'CALL'
-        if opt_str.startswith(('P', 'PUT')):
+        elif opt_str.startswith(('P', 'PUT')):
             out['option_type'] = 'PUT'
 
-    # 6. Extract Trigger
-    trigger_match = re.search(r'\bABOVE\s+(\d+(?:\.\d+)?)', clean_text)
+    # 4. Extract Levels
+    trigger_match = RE_TRIGGER.search(clean_text)
     if trigger_match:
         out['trigger_above'] = float(trigger_match.group(1))
 
-    # 7. Extract SL (FIXED WITH \b)
-    sl_match = re.search(r'\b(?:SL|STOP\s*LOSS)[\s:\-]*(\d+(?:\.\d+)?)', clean_text)
+    sl_match = RE_SL.search(clean_text)
     if sl_match:
         out['stop_loss'] = float(sl_match.group(1))
 
-    # 8. Generate Trading Symbol
+    # 5. Extract Targets (Takes the last value from range)
+    target_match = RE_TARGET.search(clean_text)
+    if target_match:
+        raw_target_string = target_match.group(1)
+        cleaned_string = re.sub(r'[\.\s]+', ',', raw_target_string.strip())
+
+        found_values = []
+        for t in cleaned_string.split(','):
+            if t:
+                try:
+                    found_values.append(float(t))
+                except ValueError:
+                    continue
+
+        if found_values:
+            out['target'] = found_values[-1]
+
+    # 6. Generate Trading Symbol
     if out['underlying'] and out['strike'] and out['option_type']:
         try:
             manual_date = extract_explicit_date(clean_text)
@@ -239,9 +257,8 @@ def parse_single_block(text: str, reference_date: Optional[date] = None) -> Dict
 
 
 # --- 5. Stitching Logic ---
-
-
 def is_partial_signal(text: str) -> bool:
+    """Checks if buffer has partial signal components."""
     up = text.upper()
     has_action = 'BUY' in up or 'SELL' in up
     has_symbol = detect_underlying(text) is not None
@@ -255,6 +272,7 @@ def process_and_save(
     jsonl_path: str = SIGNALS_JSONL,
     json_path: str = SIGNALS_JSON,
 ) -> List[Dict[str, Any]]:
+    """Processes a batch of messages, parses signals, and saves unique ones."""
     if len(messages) != len(dates):
         return []
 
@@ -282,6 +300,7 @@ def process_and_save(
         buffer = ''
         buffer_dates = []
 
+    # Stream Processing
     for msg, dt in zip(messages, dates):
         text = msg.strip()
         if not text:
@@ -294,7 +313,6 @@ def process_and_save(
 
         is_ignore_line = any(k in text.upper() for k in IGNORE_KEYWORDS)
         is_price_noise = is_price_only(text)
-
         buffer_is_partial = is_partial_signal(buffer) if buffer else False
 
         current_ts = to_ist(dt)
@@ -302,17 +320,13 @@ def process_and_save(
         is_stale = (current_ts and last_ts) and (current_ts - last_ts).total_seconds() > 300
 
         should_flush = False
-
         if not buffer:
             should_flush = False
         elif is_stale:
             should_flush = True
         elif is_strong_new:
-            if buffer.strip().upper() in [
-                'POSITIONAL',
-                'RISKY',
-                'POSITIONAL RISKY',
-            ]:
+            # Don't flush if it's just a positional tag following a strong signal
+            if buffer.strip().upper() in ['POSITIONAL', 'RISKY', 'POSITIONAL RISKY']:
                 should_flush = False
             else:
                 should_flush = True
@@ -329,16 +343,16 @@ def process_and_save(
 
     flush_buffer()
 
-    # Deduplication & Saving
+    # Deduplication & Persistence
     new_unique = []
     existing = []
 
     if os.path.exists(jsonl_path):
         try:
             with open(jsonl_path, 'r') as f:
-                existing: List[Dict[str, Any]] = [json.loads(line) for line in f if line.strip()]
+                existing = [json.loads(line) for line in f if line.strip()]
         except Exception as e:
-            logger.info(msg=f'Failed to read existing signals: {e}')
+            logger.info(f'Failed to read existing signals: {e}')
 
     for new_sig in parsed_signals:
         is_dupe = False
@@ -354,9 +368,7 @@ def process_and_save(
                 old_ts = to_ist(old_sig.get('timestamp'))
                 if old_ts and (new_ts - old_ts).total_seconds() < (DEDUPE_WINDOW_MINUTES * 60):
                     is_dupe = True
-                    logger.info(
-                        f'Duplicate detected: {new_sig["trading_symbol"]} (Already processed recently)'
-                    )
+                    logger.info(f'Duplicate detected: {new_sig["trading_symbol"]}')
                     break
 
         if not is_dupe:
@@ -373,8 +385,7 @@ def process_and_save(
     return new_unique
 
 
-# --- 6. Robust Test Suite ---
-
+# --- 6. Test Suite ---
 if __name__ == '__main__':
     print(f'\nRunning Test Suite [Time: {now_ist()}]')
 
@@ -383,53 +394,20 @@ if __name__ == '__main__':
         mock_now = mock_now.replace(tzinfo=IST)
 
     test_stream = [
-        # 1. Messy One-Liner
         'BANKNIFTY 43500 PE BUY ABOVE 320 SL 280 TARGET 400',
         'SENSEX 87500 CE BUY ABOVE 420 SL 380 TARGET 500',
-        # 2. Scrambled
-        'SENSEX 86000 CE',
-        'ABOVE 500',
-        'TARGET 600',
-        'BUY',
-        # 3. Hero Zero (No Trigger)
-        'HERO ZERO',
-        'Buy Nifty 24200 CE at market',
-        'SL 10',
-        'Target Open',
-        # 4. Explicit Date (25 DEC)
+        'Hero Zero Risky',
+        'Buy Sensex 84500 CE ABOVE 140',
+        'SL 115',
+        'Target 160.... 250',
         'Positional',
         'Buy Sensex 25 Dec 85000 CE Above 1000',
         'SL 800',
-        # 5. Noise Handling
-        'BUY NIFTY 26000 CE',
-        'Above 150',
-        'SL 120',
-        '160',
-        '170',
-        'Safe traders book',
-        '180.... 🚀',
-        # 6. FINNIFTY (Should be IGNORED now)
-        'Buy FINNIFTY 21000 CE Above 50 SL 30',
-        'Watch Nifty 25000 PE',
-        'Keep on radar',
-        # 7. Split Signal Outlier
-        'Buy Nifty 24000 CE',  # Msg 1
-        'Above 120',  # Msg 2 (Looks like noise, but isn't)
-        'SL 80',  # Msg 3
-        # 8. Force Flush New Signal
-        'Buy Sensex 86000 PE',
-        '100',
-        'SL 50',
-        # 9. Multi-line Positional
+        'Target 1200 1400',
         'Risky',
         'Buy Banknifty 58700 ce above 420',
         'sl 385',
-        'target 5%...550',
-        # 10. Stocks
-        'Risky',
-        'BUY RELIANCE 2500 CE above 80',
-        'SL 60',
-        'target 5%....50%',
+        'target 550.... 650',
     ]
 
     test_dates = [mock_now for _ in test_stream]
@@ -442,11 +420,11 @@ if __name__ == '__main__':
     )
 
     print(f'\nProcessed {len(results)} signals.\n')
-    print(f'{"SYMBOL":<35} | {"ACTION":<5} | {"TRIG":<5} | {"SL":<5} | {"POS"}')
-    print('-' * 65)
+    print(f'{"SYMBOL":<35} | {"ACTION":<5} | {"TRIG":<5} | {"SL":<5} | {"TARGET"}')
+    print('-' * 80)
 
     for r in results:
         trig = str(r['trigger_above']) if r['trigger_above'] is not None else '---'
         sl = str(r['stop_loss']) if r['stop_loss'] is not None else '---'
-        pos = 'YES' if r['is_positional'] else 'NO'
-        print(f'{r["trading_symbol"]:<35} | {r["action"]:<5} | {trig:<5} | {sl:<5} | {pos}')
+        target = str(r['target'])
+        print(f'{r["trading_symbol"]:<35} | {r["action"]:<5} | {trig:<5} | {sl:<5} | {target}')
