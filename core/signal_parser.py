@@ -36,11 +36,6 @@ try:
 except ImportError:
     IST = None
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] [%(name)s] %(message)s',
-    datefmt='%H:%M:%S',
-)
 logger = logging.getLogger('Parser')
 
 MARKET_OPEN_TIME = time(9, 15)

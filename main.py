@@ -42,6 +42,49 @@ SIGNALS_JSONL = os.getenv('SIGNALS_JSONL', 'data/signals.jsonl')
 SIGNALS_JSON = os.getenv('SIGNALS_JSON', 'data/signals.json')
 BATCH_DELAY_SECONDS = 2.0
 
+# --- SAFETY KEYWORDS (UPDATED) ---
+# These trigger a "Pause for Today"
+PAUSE_KEYWORDS = [
+    # Explicit Stops
+    'SAFE AVOID',
+    'SAFE DONT TRADE',
+    "DON'T TRADE",
+    'NO TRADE',
+    'STOP TRADING',
+    'AVOID TRADING',
+    'CLOSE FOR TODAY',
+    # Market Conditions
+    'MARKET CHOPPY',
+    'TRAPPING',
+    'NON DIRECTIONAL',
+    'SIDEWAYS',
+    # Audience Restrictions
+    'RISKY AVOID',
+    'SAFE TRADERS STAY AWAY',
+    'BEGINNERS AVOID',
+    'BEGINNER AVOID',
+    'ONLY PRO',
+    'ONLY RISK',
+    'RISK TRADERS ONLY',
+    # Strategy Shifts (implies normal signals are off)
+    'SCALP ONLY',
+    'SCALP NOT TRADE',
+]
+
+# These trigger an immediate Resume
+RESUME_KEYWORDS = [
+    'SAFE NOW',
+    'RESUME',
+    'GOOD TO GO',
+    'HERO ZERO',
+    'JACKPOT',
+    'ROCKET',
+    'RECOVERY',
+    'ENTER NOW',
+    'MARKET GOOD',
+    'BTST',  # Sometimes BTST signals come after a choppy day
+]
+
 # Ensure directories exist
 os.makedirs('logs', exist_ok=True)
 os.makedirs('data', exist_ok=True)
@@ -49,12 +92,10 @@ os.makedirs('data', exist_ok=True)
 
 # --- LOGGING SETUP ---
 def setup_logging():
-    """Configures rotating file handlers and console output."""
     formatter = logging.Formatter(
         '%(asctime)s [%(levelname)s] [%(name)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S'
     )
 
-    # File Handler
     file_handler = RotatingFileHandler(
         'logs/trade_logs.log',
         mode='a',
@@ -64,7 +105,6 @@ def setup_logging():
     )
     file_handler.setFormatter(formatter)
 
-    # Error Handler
     error_handler = RotatingFileHandler(
         'logs/errors.log',
         mode='a',
@@ -75,7 +115,6 @@ def setup_logging():
     error_handler.setLevel(logging.ERROR)
     error_handler.setFormatter(formatter)
 
-    # Console Handler
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(formatter)
 
@@ -113,53 +152,7 @@ signal.signal(signal.SIGINT, handle_shutdown_signal)
 
 
 # --- BACKGROUND TASKS ---
-
-
-# async def risk_monitor_task(client: TelegramClient, bridge: DhanBridge):
-#     """
-#     Checks P&L every 10 seconds.
-#     If triggered, Sends Message -> Disconnects -> Terminates Program (Success Code 0).
-#     """
-#     logger.info(f'Risk Monitor Started (Max Loss Limit: {LOSS_LIMIT})')
-
-#     while True:
-#         try:
-#             # Check kill switch logic
-#             killed = bridge.check_kill_switch(loss_limit=LOSS_LIMIT)
-
-#             if killed:
-#                 logger.critical('KILL SWITCH TRIGGERED! TERMINATING PROGRAM.')
-
-#                 if ADMIN_ID:
-#                     try:
-#                         await client.send_message(
-#                             int(ADMIN_ID),
-#                             f'**KILL SWITCH ACTIVATED**\n\n'
-#                             f'Loss limit of {LOSS_LIMIT} breached.\n'
-#                             f'Positions closed & API disabled.\n'
-#                             f'**Bot is shutting down now.**',
-#                         )
-#                     except Exception:
-#                         pass
-
-#                 await client.disconnect()
-
-#                 logger.info('Shutdown complete.')
-#                 sys.exit(0)
-
-#         except Exception as e:
-#             logger.error(f'Risk Monitor Error: {e}')
-#             await asyncio.sleep(5)
-
-#         await asyncio.sleep(10)
-
-
 async def check_market_hours(client: TelegramClient, bridge: DhanBridge):
-    """
-    Monitors time for:
-    1. Friday 3:18 PM -> Auto Square-off
-    2. Daily 3:30 PM  -> Bot Shutdown
-    """
     SHUTDOWN_TIME = time(15, 30)
 
     logger.info('Market Monitor Started (Fri SqOff: 15:18 | Stop: 15:30)')
@@ -168,7 +161,6 @@ async def check_market_hours(client: TelegramClient, bridge: DhanBridge):
         now = datetime.now()
         current_time = now.time()
 
-        # 1. Friday Auto Square-off
         if now.weekday() == 4:  # Friday
             if current_time.hour == 15 and current_time.minute == 18:
                 logger.warning('Friday 3:18 PM: Triggering Auto-Square Off.')
@@ -179,13 +171,11 @@ async def check_market_hours(client: TelegramClient, bridge: DhanBridge):
                 except Exception as e:
                     logger.error(f'Square Off Failed: {e}')
 
-                # Sleep to ensure we don't trigger multiple times in the same minute
                 await asyncio.sleep(65)
 
-        # 2. Daily Shutdown
         if current_time >= SHUTDOWN_TIME:
             logger.info('Market Closed (3:30 PM). Disconnecting...')
-            await client.disconnect()
+            await client.disconnect() # pyright: ignore[reportGeneralTypeIssues]
             return
 
         await asyncio.sleep(30)
@@ -193,10 +183,8 @@ async def check_market_hours(client: TelegramClient, bridge: DhanBridge):
 
 # --- TELEGRAM HELPER FUNCTIONS ---
 async def resolve_channel(client: TelegramClient, target: str) -> Any:
-    """Resolves Telegram channel by ID, Username, or Title."""
     logger.info(f'Resolving channel: {target}')
 
-    # 1. Try Numeric ID
     if str(target).lstrip('-').isdigit():
         try:
             entity = await client.get_entity(int(target))
@@ -205,7 +193,6 @@ async def resolve_channel(client: TelegramClient, target: str) -> Any:
         except ValueError:
             pass
 
-    # 2. Try Username / Direct Entity
     try:
         entity = await client.get_entity(target)
         title = getattr(entity, 'title', getattr(entity, 'username', target))
@@ -214,7 +201,6 @@ async def resolve_channel(client: TelegramClient, target: str) -> Any:
     except ValueError:
         pass
 
-    # 3. Search Dialogs by Title (Fallback)
     logger.info(f"Searching dialogs for title: '{target}'...")
     async for d in client.iter_dialogs(limit=500):
         title = getattr(d.entity, 'title', '')
@@ -225,31 +211,80 @@ async def resolve_channel(client: TelegramClient, target: str) -> Any:
     raise ValueError(f'Could not resolve channel: {target}')
 
 
-class SignalBatcher:
-    """Handles message buffering, deduplication, and parsing."""
+class ChannelState:
+    """Manages pause/resume state for individual channels."""
 
+    def __init__(self):
+        self._paused_until: Dict[int, datetime] = {}
+
+    def pause(self, channel_id: int):
+        """Pauses the channel until Midnight (Start of next day)."""
+        now = datetime.now()
+        end_of_day = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+
+        self._paused_until[channel_id] = end_of_day
+        logger.warning(
+            f'Channel {channel_id} PAUSED until End of Day ({end_of_day.strftime("%H:%M:%S")})'
+        )
+
+    def resume(self, channel_id: int):
+        """Manually resumes the channel."""
+        if channel_id in self._paused_until:
+            del self._paused_until[channel_id]
+            logger.info(f'Channel {channel_id} RESUMED manually.')
+
+    def is_paused(self, channel_id: int) -> bool:
+        """Checks if channel is paused. Auto-resumes if new day."""
+        if channel_id not in self._paused_until:
+            return False
+
+        if datetime.now() > self._paused_until[channel_id]:
+            del self._paused_until[channel_id]
+            logger.info(f'Channel {channel_id} Auto-Resumed (New Day Detected).')
+            return False
+
+        return True
+
+
+class SignalBatcher:
     def __init__(self, bridge_instance: DhanBridge):
         self.batch_messages: List[str] = []
         self.batch_dates: List[datetime] = []
         self._timer_task: Optional[asyncio.Task] = None
         self.bridge = bridge_instance
         self.active_monitors = set()
+        self.channel_state = ChannelState()
 
-    async def add_message(self, text: str, dt: datetime):
-        """Adds message to buffer and resets processing timer."""
+    async def add_message(self, text: str, dt: datetime, channel_id: int):
+        """Adds message if channel is active. Checks for Stop/Start keywords."""
+
+        clean_text = text.upper()
+
+        # 1. CHECK FOR RESUME COMMANDS (First Priority)
+        if any(k in clean_text for k in RESUME_KEYWORDS):
+            self.channel_state.resume(channel_id)
+
+        # 2. CHECK FOR PAUSE COMMANDS
+        # Check against the UPDATED, extended keyword list
+        if any(k in clean_text for k in PAUSE_KEYWORDS):
+            logger.info(f'⚠️ Pause Keyword Detected in Channel {channel_id}: "{text[:20]}..."')
+            self.channel_state.pause(channel_id)
+            return  # Stop processing this message
+
+        # 3. CHECK IF CHANNEL IS PAUSED
+        if self.channel_state.is_paused(channel_id):
+            return
+
+        # 4. ADD TO BATCH
         self.batch_messages.append(text)
         self.batch_dates.append(dt)
 
         if self._timer_task:
             self._timer_task.cancel()
 
-        # Debounce: Wait for silence before processing
         self._timer_task = asyncio.create_task(self._process_after_delay())
 
     async def _retry_monitor(self, res: Dict[str, Any], reason: str):
-        """
-        Polls market for 15 minutes if order is waiting for levels (PRICE_HIGH/PRICE_LOW).
-        """
         symbol = res.get('trading_symbol')
         entry = res.get('trigger_above')
 
@@ -257,7 +292,6 @@ class SignalBatcher:
             self.active_monitors.add(symbol)
             logger.info(f'Monitor Started: {symbol} | Reason: {reason} | Entry: {entry}')
 
-            # Poll for 15 minutes (15 checks * 60 seconds)
             for attempt in range(1, 16):
                 if self.bridge.kill_switch_triggered:
                     logger.warning(f'Monitor Stopped: {symbol} (Kill Switch Active)')
@@ -266,7 +300,6 @@ class SignalBatcher:
                 await asyncio.sleep(60)
                 logger.info(f'Polling {symbol} ({attempt}/15)...')
 
-                # Re-check Logic
                 status = await asyncio.to_thread(self.bridge.execute_super_order, res)
 
                 if status == 'SUCCESS':
@@ -276,20 +309,16 @@ class SignalBatcher:
                     logger.error(f'Monitor aborted for {symbol} due to error.')
                     return
 
-                # If status is still PRICE_HIGH or PRICE_LOW, loop continues automatically
-
             logger.warning(f'Monitor Timed Out (15m): {symbol}. Signal Expired.')
 
         finally:
             self.active_monitors.discard(symbol)
 
     async def _process_after_delay(self):
-        """Processes buffered messages after silence."""
         try:
             await asyncio.sleep(BATCH_DELAY_SECONDS)
             logger.info(f'Processing batch ({len(self.batch_messages)} msgs)...')
 
-            # 1. Parse
             try:
                 results = process_and_save(
                     self.batch_messages,
@@ -301,7 +330,6 @@ class SignalBatcher:
                 logger.error(f'Parsing Error: {e}', exc_info=True)
                 results = []
 
-            # 2. Execute
             if results:
                 logger.info(f'Found {len(results)} valid signals')
 
@@ -314,7 +342,6 @@ class SignalBatcher:
                         f'Signal {idx}/{len(results)}: {symbol} | {action} | Entry: {entry}'
                     )
 
-                    # Deduplication check for monitoring
                     if symbol in self.active_monitors:
                         logger.warning(
                             f'Duplicate Signal ignored: {symbol} is already being monitored.'
@@ -322,10 +349,7 @@ class SignalBatcher:
                         continue
 
                     try:
-                        # Offload blocking API call to thread
                         status = await asyncio.to_thread(self.bridge.execute_super_order, res)
-
-                        # If waiting for levels, start background monitor
                         if status in ['PRICE_HIGH', 'PRICE_LOW']:
                             asyncio.create_task(self._retry_monitor(res, status))
 
@@ -339,7 +363,6 @@ class SignalBatcher:
         except Exception as e:
             logger.error(f'Batch Logic Error: {e}', exc_info=True)
         finally:
-            # Reset Buffer
             current_task = asyncio.current_task()
             if current_task and not current_task.cancelled():
                 self.batch_messages = []
@@ -354,7 +377,6 @@ async def main():
     logger.info(f'Mode: {"Production" if not __debug__ else "Debug"}')
     logger.info('=' * 60)
 
-    # 1. Validation
     if not TELEGRAM_API_ID or not TELEGRAM_API_HASH:
         logger.critical('Missing TELEGRAM_API_ID or TELEGRAM_API_HASH in .env')
         return
@@ -362,7 +384,6 @@ async def main():
         logger.critical('Missing TARGET_CHANNELS in .env')
         return
 
-    # 2. Initialize Bridge
     logger.info('Initializing Dhan Bridge...')
     try:
         bridge = DhanBridge()
@@ -373,7 +394,6 @@ async def main():
 
     batcher = SignalBatcher(bridge)
 
-    # 3. Connect Telegram
     logger.info('Connecting to Telegram...')
     try:
         client = TelegramClient(
@@ -381,18 +401,15 @@ async def main():
             api_id=int(TELEGRAM_API_ID),
             api_hash=TELEGRAM_API_HASH,
         )
-        await client.start()  # pyright: ignore[reportGeneralTypeIssues]
+        await client.start() # pyright: ignore[reportGeneralTypeIssues]
         logger.info('Telegram Connected')
 
-        # Start Background Tasks
         asyncio.create_task(check_market_hours(client, bridge))
-        # asyncio.create_task(risk_monitor_task(client, bridge))
 
     except Exception as e:
         logger.critical(f'Telegram Connection Failed: {e}', exc_info=True)
         return
 
-    # 4. Resolve Channels
     resolved_chats = []
     logger.info('Resolving Target Channels...')
 
@@ -408,7 +425,7 @@ async def main():
         logger.critical('No valid channels found. Exiting.')
         return
 
-    # 5. Admin Commands
+    # Admin Commands
     if ADMIN_ID:
         try:
             admin_id_int = int(ADMIN_ID)
@@ -428,14 +445,12 @@ async def main():
                         f'Loss Limit: {LOSS_LIMIT}\n'
                         f'Time: {datetime.now().strftime("%H:%M:%S")}'
                     )
-
                 elif text == '/logs':
                     await event.reply('Uploading logs...')
                     files = [
                         f for f in ['logs/trade_logs.log', 'logs/errors.log'] if os.path.exists(f)
                     ]
                     await event.reply(file=files) if files else await event.reply('No logs found.')
-
                 elif text == '/force_sqoff':
                     await event.reply('⚠️ Force Square-off Triggered!')
                     bridge.square_off_all()
@@ -443,7 +458,6 @@ async def main():
         except ValueError:
             logger.error('ADMIN_ID is not a valid integer.')
 
-    # 6. Message Listener
     logger.info('=' * 60)
     logger.info(f'Active Listeners: {len(resolved_chats)}')
     logger.info('=' * 60)
@@ -453,13 +467,14 @@ async def main():
         try:
             text = event.message.message
             if text:
-                await batcher.add_message(text, event.message.date)
+                # Pass chat_id to track pausing per channel
+                await batcher.add_message(text, event.message.date, event.chat_id) # pyright: ignore[reportArgumentType]
                 logger.info(f'Received message ({len(text)} chars)')
         except Exception as e:
             logger.error(f'Handler Error: {e}', exc_info=True)
 
     try:
-        await client.run_until_disconnected()  # pyright: ignore[reportGeneralTypeIssues]
+        await client.run_until_disconnected() # pyright: ignore[reportGeneralTypeIssues]
     except Exception as e:
         logger.critical(f'Client Disconnected: {e}', exc_info=True)
         raise

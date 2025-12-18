@@ -1,16 +1,12 @@
 import logging
 import os
-import requests
-import polars as pl
 from datetime import date, datetime
 from typing import Tuple
 
+import polars as pl
+import requests
+
 # --- CONFIGURATION ---
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] [%(name)s] %(message)s',
-    datefmt='%H:%M:%S',
-)
 logger = logging.getLogger('DhanMapper')
 
 
@@ -52,7 +48,7 @@ class DhanMapper:
         if self._is_file_fresh():
             return
 
-        logger.info('Downloading Dhan Scrip Master (~500MB)...')
+        logger.info('Downloading Dhan Scrip Master...')
         logger.info('This may take a few minutes depending on connection speed...')
 
         try:
@@ -87,7 +83,6 @@ class DhanMapper:
         self._ensure_csv()
 
         try:
-            # Polars query to filter for the specific symbol
             # Enforces 'NSE' for Stocks and allows 'NSE'/'BSE' for Indices
             q = (
                 pl.scan_csv(self.csv_path)
@@ -137,7 +132,7 @@ if __name__ == '__main__':
 
     test_cases = [
         'BANKNIFTY 30 DEC 69700 CALL',
-        'SENSEX 11 DEC 85500 CALL',
+        'SENSEX 24 DEC 85500 CALL',
         'RELIANCE 30 DEC 1500 CALL',  # Example stock
         'INVALID SYMBOL TEST',
     ]

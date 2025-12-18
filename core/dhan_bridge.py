@@ -3,7 +3,7 @@ import math
 import os
 import time
 from datetime import datetime, timedelta
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import requests
@@ -80,13 +80,14 @@ class DhanBridge:
             return 0.0
 
     def get_ltp(self, security_id: str, exchange_segment: str) -> Optional[float]:
-        """Fetches the Last Traded Price (LTP) for a security."""
+        """
+        Fetches the Last Traded Price (LTP) for a security.
+        """
         if not self.access_token:
             return None
+
         try:
             payload = {exchange_segment: [int(security_id)]}
-            if exchange_segment == 'BSE_FNO':
-                payload['BSE'] = [int(security_id)]
 
             response = self.session.post(f'{self.base_url}/marketfeed/ltp', json=payload, timeout=5)
             data = response.json()
@@ -94,13 +95,18 @@ class DhanBridge:
             if not data.get('data'):
                 return None
 
-            str_id = str(security_id)
-            for _, items in data['data'].items():
-                if str_id in items:
-                    return float(items[str_id].get('last_price', 0))
+            segment_data = data['data'].get(exchange_segment, {})
+            instrument_data = segment_data.get(str(security_id), {})
+
+            price = instrument_data.get('last_price')
+
+            if price is not None:
+                return float(price)
+
             return None
+
         except Exception as e:
-            logger.error(f'LTP Fetch Error: {e}')
+            logger.error(f'LTP Fetch Error for {security_id} [{exchange_segment}]: {e}')
             return None
 
     def calculate_quantity(
