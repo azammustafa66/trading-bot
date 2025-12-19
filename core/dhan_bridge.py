@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 import math
 import os
@@ -34,8 +36,8 @@ class DhanBridge:
 
     # Multipliers
     SL_MULTIPLIER = 3.0
-    TRAIL_MULTIPLIER_POS = 2.0
-    TRAIL_MULTIPLIER_INTRA = 1.5
+    TRAIL_MULTIPLIER_POS = 1.5
+    TRAIL_MULTIPLIER_INTRA = 1.25
     TARGET_RR_RATIO_POS = 5.0
     TARGET_RR_RATIO_INTRA = 4.0
 
@@ -348,11 +350,8 @@ class DhanBridge:
             trailing_jump = max((atr * trail_mult) if atr else fb_trail, fb_trail)
 
             if sl_price == 0:
-                if 'HERO' in signal.get('raw', '').upper():
-                    sl_price = 5.0
-                else:
-                    sl_dist = (atr * self.SL_MULTIPLIER) if atr else fb_sl
-                    sl_price = anchor - sl_dist
+                sl_dist = (atr * self.SL_MULTIPLIER) if atr else fb_sl
+                sl_price = anchor - sl_dist
 
             # Clamp SL to ensure it's valid
             sl_price = max(sl_price, anchor - fb_sl, 5.0)
@@ -366,7 +365,6 @@ class DhanBridge:
             if raw_target > 0:
                 target_price = raw_target
             else:
-                # Fallback Logic
                 rr_mult = self.TARGET_RR_RATIO_POS if is_pos else self.TARGET_RR_RATIO_INTRA
                 tgt_dist = max(rr_mult * sl_dist, 10.0 * atr) if atr else (5.0 * sl_dist)
                 target_price = anchor + tgt_dist

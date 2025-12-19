@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 import os
 from datetime import date, datetime
@@ -73,21 +75,32 @@ class DhanMapper:
         """
         Maps a trading symbol to (Security ID, Exchange ID, Lot Size).
 
-        Args:
-            trading_symbol (str): The symbol to look up (e.g., "BANKNIFTY 25 SEP 44000 CALL").
-
-        Returns:
-            Tuple[str, str, int]: (Security ID, Exchange ID, Lot Size).
-            Returns ('', '', -1) if not found.
+        Bidirectional Matching Logic:
+        1. Input 'EICHER'       matches CSV 'EICHERMOT'  (CSV starts with Input)
+        2. Input 'EICHERMOTORS' matches CSV 'EICHERMOT'  (Input starts with CSV)
         """
         self._ensure_csv()
 
         try:
-            # Enforces 'NSE' for Stocks and allows 'NSE'/'BSE' for Indices
+            parts = trading_symbol.split(' ', 1)
+
+            if len(parts) == 2:
+                user_root, suffix = parts
+
+                csv_root_col = pl.col(self.COL_SYMBOL).str.split(' ').list.get(0)
+                root_match = csv_root_col.str.starts_with(user_root) | pl.lit(
+                    user_root
+                ).str.starts_with(csv_root_col)
+                symbol_condition = root_match & pl.col(self.COL_SYMBOL).str.ends_with(suffix)
+            else:
+                symbol_condition = pl.col(self.COL_SYMBOL).str.starts_with(trading_symbol) | pl.lit(
+                    trading_symbol
+                ).str.starts_with(pl.col(self.COL_SYMBOL))
+
             q = (
                 pl.scan_csv(self.csv_path)
                 .filter(
-                    (pl.col(self.COL_SYMBOL) == trading_symbol)
+                    symbol_condition
                     & (
                         (
                             (pl.col(self.COL_INSTRUMENT) == 'OPTSTK')
@@ -99,18 +112,25 @@ class DhanMapper:
                         )
                     )
                 )
-                .select([self.COL_SEC_ID, self.COL_EXCHANGE, self.COL_LOT_SIZE])
+                .select([self.COL_SYMBOL, self.COL_SEC_ID, self.COL_EXCHANGE, self.COL_LOT_SIZE])
             )
 
             df = q.collect()
 
             if not df.is_empty():
+                if len(df) > 1:
+                    logger.info(
+                        f"Fuzzy match found multiple results for '{trading_symbol}'. Using: {
+                            df.item(0, self.COL_SYMBOL)
+                        }"
+                    )
+
                 sec_id = str(df.item(0, self.COL_SEC_ID))
                 exch = str(df.item(0, self.COL_EXCHANGE))
 
                 try:
                     lot_size = int(float(df.item(0, self.COL_LOT_SIZE)))
-                    lot_size = max(1, lot_size)  # Ensure lot size is at least 1
+                    lot_size = max(1, lot_size)
                 except (ValueError, TypeError):
                     logger.warning(f'Invalid lot size for {trading_symbol}, defaulting to 1.')
                     lot_size = 1
@@ -125,7 +145,6 @@ class DhanMapper:
             return '', '', -1
 
 
-# --- TEST SUITE ---
 if __name__ == '__main__':
     print('\n--- RUNNING DHAN MAPPER DIAGNOSTICS ---\n')
     mapper = DhanMapper()
@@ -133,8 +152,9 @@ if __name__ == '__main__':
     test_cases = [
         'BANKNIFTY 30 DEC 69700 CALL',
         'SENSEX 24 DEC 85500 CALL',
-        'RELIANCE 30 DEC 1500 CALL',  # Example stock
-        'INVALID SYMBOL TEST',
+        'RELIANCE 30 DEC 1500 CALL',
+        'EICHER 30 DEC 8000 PUT',
+        'TATASTEE 30 DEC 100 PUT',
     ]
 
     print(f'Testing {len(test_cases)} symbols...')

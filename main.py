@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import logging
 import os
@@ -42,24 +44,23 @@ SIGNALS_JSONL = os.getenv('SIGNALS_JSONL', 'data/signals.jsonl')
 SIGNALS_JSON = os.getenv('SIGNALS_JSON', 'data/signals.json')
 BATCH_DELAY_SECONDS = 2.0
 
-# --- SAFETY KEYWORDS (UPDATED) ---
+# --- SAFETY KEYWORDS ---
 # These trigger a "Pause for Today"
 PAUSE_KEYWORDS = [
     # Explicit Stops
     'SAFE AVOID',
     'SAFE DONT TRADE',
-    "DON'T TRADE",
     'NO TRADE',
-    'STOP TRADING',
     'AVOID TRADING',
     'CLOSE FOR TODAY',
+    'SAFE AVOID TODAY',
+    'SAFE TRADERS AVOID TODAY',
     # Market Conditions
     'MARKET CHOPPY',
     'TRAPPING',
     'NON DIRECTIONAL',
     'SIDEWAYS',
     # Audience Restrictions
-    'RISKY AVOID',
     'SAFE TRADERS STAY AWAY',
     'BEGINNERS AVOID',
     'BEGINNER AVOID',
@@ -82,7 +83,7 @@ RESUME_KEYWORDS = [
     'RECOVERY',
     'ENTER NOW',
     'MARKET GOOD',
-    'BTST',  # Sometimes BTST signals come after a choppy day
+    'BTST',
 ]
 
 # Ensure directories exist
@@ -175,7 +176,7 @@ async def check_market_hours(client: TelegramClient, bridge: DhanBridge):
 
         if current_time >= SHUTDOWN_TIME:
             logger.info('Market Closed (3:30 PM). Disconnecting...')
-            await client.disconnect() # pyright: ignore[reportGeneralTypeIssues]
+            await client.disconnect()  # pyright: ignore[reportGeneralTypeIssues]
             return
 
         await asyncio.sleep(30)
@@ -260,16 +261,15 @@ class SignalBatcher:
 
         clean_text = text.upper()
 
-        # 1. CHECK FOR RESUME COMMANDS (First Priority)
         if any(k in clean_text for k in RESUME_KEYWORDS):
             self.channel_state.resume(channel_id)
 
         # 2. CHECK FOR PAUSE COMMANDS
         # Check against the UPDATED, extended keyword list
         if any(k in clean_text for k in PAUSE_KEYWORDS):
-            logger.info(f'⚠️ Pause Keyword Detected in Channel {channel_id}: "{text[:20]}..."')
+            logger.info(f'Pause Keyword Detected in Channel {channel_id}: "{text[:20]}..."')
             self.channel_state.pause(channel_id)
-            return  # Stop processing this message
+            return
 
         # 3. CHECK IF CHANNEL IS PAUSED
         if self.channel_state.is_paused(channel_id):
@@ -297,8 +297,8 @@ class SignalBatcher:
                     logger.warning(f'Monitor Stopped: {symbol} (Kill Switch Active)')
                     return
 
-                await asyncio.sleep(60)
-                logger.info(f'Polling {symbol} ({attempt}/15)...')
+                await asyncio.sleep(15)
+                logger.info(f'Polling {symbol} ({attempt}/60)...')
 
                 status = await asyncio.to_thread(self.bridge.execute_super_order, res)
 
@@ -401,7 +401,7 @@ async def main():
             api_id=int(TELEGRAM_API_ID),
             api_hash=TELEGRAM_API_HASH,
         )
-        await client.start() # pyright: ignore[reportGeneralTypeIssues]
+        await client.start()  # pyright: ignore[reportGeneralTypeIssues]
         logger.info('Telegram Connected')
 
         asyncio.create_task(check_market_hours(client, bridge))
@@ -468,13 +468,13 @@ async def main():
             text = event.message.message
             if text:
                 # Pass chat_id to track pausing per channel
-                await batcher.add_message(text, event.message.date, event.chat_id) # pyright: ignore[reportArgumentType]
+                await batcher.add_message(text, event.message.date, event.chat_id)  # pyright: ignore[reportArgumentType]
                 logger.info(f'Received message ({len(text)} chars)')
         except Exception as e:
             logger.error(f'Handler Error: {e}', exc_info=True)
 
     try:
-        await client.run_until_disconnected() # pyright: ignore[reportGeneralTypeIssues]
+        await client.run_until_disconnected()  # pyright: ignore[reportGeneralTypeIssues]
     except Exception as e:
         logger.critical(f'Client Disconnected: {e}', exc_info=True)
         raise

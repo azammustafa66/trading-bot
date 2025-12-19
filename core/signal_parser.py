@@ -12,11 +12,13 @@ from dotenv import load_dotenv
 
 # --- 1. Import Setup ---
 try:
-    from utils.generate_expiry_dates import select_expiry_date, select_expiry_label
+    from utils.generate_expiry_dates import (select_expiry_date,
+                                             select_expiry_label)
 except ImportError:
     try:
         sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        from utils.generate_expiry_dates import select_expiry_date, select_expiry_label
+        from utils.generate_expiry_dates import (select_expiry_date,
+                                                 select_expiry_label)
     except ImportError:
         # Fallback dummy functions for standalone testing
         def select_expiry_date(underlying: str, reference_dt: Optional[datetime] = None) -> date:
@@ -70,7 +72,7 @@ RE_DATE = re.compile(
 RE_STRIKE = re.compile(r'\b(\d{4,6}|\d{2,5}(?:\.\d+)?)\s*(CE|PE|C|P|CALL|PUT)?\b', re.IGNORECASE)
 RE_TRIGGER = re.compile(r'\bABOVE\s+(\d+(?:\.\d+)?)', re.IGNORECASE)
 RE_SL = re.compile(r'\b(?:SL|STOP\s*LOSS)[\s:\-]*(\d+(?:\.\d+)?)', re.IGNORECASE)
-RE_TARGET = re.compile(r'TARGETS?\s+([\d\.\s]+)', re.IGNORECASE)
+RE_TARGET = re.compile(r'TARGETS?[\s:\-]+([\d\.\s…,\-]+)', re.IGNORECASE)
 RE_DIGITS_ONLY = re.compile(r'[\d\.\-\s]+')
 
 
@@ -125,7 +127,7 @@ def detect_underlying(text: str) -> Optional[str]:
     if 'SENSEX' in up or 'SNSEX' in up:
         return 'SENSEX'
 
-    stock_name = extract_stock_name(text)
+    stock_name = extract_stock_name(up)
     if stock_name:
         return stock_name.replace(' ', '')
     return None
@@ -213,15 +215,14 @@ def parse_single_block(text: str, reference_date: Optional[date] = None) -> Dict
     target_match = RE_TARGET.search(clean_text)
     if target_match:
         raw_target_string = target_match.group(1)
-        cleaned_string = re.sub(r'[\.\s]+', ',', raw_target_string.strip())
+        all_numbers = re.findall(r'\d+(?:\.\d+)?', raw_target_string)
 
         found_values = []
-        for t in cleaned_string.split(','):
-            if t:
-                try:
-                    found_values.append(float(t))
-                except ValueError:
-                    continue
+        for n in all_numbers:
+            try:
+                found_values.append(float(n))
+            except ValueError:
+                continue
 
         if found_values:
             out['target'] = found_values[-1]
