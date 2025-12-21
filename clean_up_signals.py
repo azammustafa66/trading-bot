@@ -6,8 +6,8 @@ from datetime import datetime
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('Cleanup')
 
-SIGNALS_FILE = 'signals.jsonl'
-ARCHIVE_DIR = 'archive'
+SIGNALS_FILE = '/data/signals.jsonl'
+ARCHIVE_DIR = '/archive'
 
 
 def clean_signals():

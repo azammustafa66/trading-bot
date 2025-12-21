@@ -5,9 +5,9 @@ import logging
 import os
 import signal
 import sys
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from logging.handlers import RotatingFileHandler
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
@@ -45,9 +45,7 @@ SIGNALS_JSON = os.getenv('SIGNALS_JSON', 'data/signals.json')
 BATCH_DELAY_SECONDS = 2.0
 
 # --- SAFETY KEYWORDS ---
-# These trigger a "Pause for Today"
 PAUSE_KEYWORDS = [
-    # Explicit Stops
     'SAFE AVOID',
     'SAFE DONT TRADE',
     'NO TRADE',
@@ -55,24 +53,20 @@ PAUSE_KEYWORDS = [
     'CLOSE FOR TODAY',
     'SAFE AVOID TODAY',
     'SAFE TRADERS AVOID TODAY',
-    # Market Conditions
     'MARKET CHOPPY',
     'TRAPPING',
     'NON DIRECTIONAL',
     'SIDEWAYS',
-    # Audience Restrictions
     'SAFE TRADERS STAY AWAY',
     'BEGINNERS AVOID',
     'BEGINNER AVOID',
     'ONLY PRO',
     'ONLY RISK',
     'RISK TRADERS ONLY',
-    # Strategy Shifts (implies normal signals are off)
     'SCALP ONLY',
     'SCALP NOT TRADE',
 ]
 
-# These trigger an immediate Resume
 RESUME_KEYWORDS = [
     'SAFE NOW',
     'RESUME',
@@ -91,12 +85,13 @@ os.makedirs('logs', exist_ok=True)
 os.makedirs('data', exist_ok=True)
 
 
-# --- LOGGING SETUP ---
+# --- LOGGING SETUP (Restored) ---
 def setup_logging():
     formatter = logging.Formatter(
         '%(asctime)s [%(levelname)s] [%(name)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S'
     )
 
+    # 1. Main Trade Log
     file_handler = RotatingFileHandler(
         'logs/trade_logs.log',
         mode='a',
@@ -106,6 +101,7 @@ def setup_logging():
     )
     file_handler.setFormatter(formatter)
 
+    # 2. Error Log
     error_handler = RotatingFileHandler(
         'logs/errors.log',
         mode='a',
@@ -116,6 +112,7 @@ def setup_logging():
     error_handler.setLevel(logging.ERROR)
     error_handler.setFormatter(formatter)
 
+    # 3. Console Output (Essential for Systemd/Journalctl)
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(formatter)
 
@@ -152,16 +149,23 @@ signal.signal(signal.SIGTERM, handle_shutdown_signal)
 signal.signal(signal.SIGINT, handle_shutdown_signal)
 
 
-# --- BACKGROUND TASKS ---
+# --- BACKGROUND TASKS (Fixed with Sleep Logic) ---
 async def check_market_hours(client: TelegramClient, bridge: DhanBridge):
+    """
+    Monitors time:
+    - 3:18 PM Friday: Auto Square-off
+    - 3:30 PM Daily: Sleeps until 9:00 AM next day (Prevents Systemd Restart Loops)
+    """
     SHUTDOWN_TIME = time(15, 30)
+    START_TIME = time(9, 0)
 
-    logger.info('Market Monitor Started (Fri SqOff: 15:18 | Stop: 15:30)')
+    logger.info('Market Monitor Started (Fri SqOff: 15:18 | Sleep: 15:30)')
 
     while True:
         now = datetime.now()
         current_time = now.time()
 
+        # 1. Friday Auto Square-off
         if now.weekday() == 4:  # Friday
             if current_time.hour == 15 and current_time.minute == 18:
                 logger.warning('Friday 3:18 PM: Triggering Auto-Square Off.')
@@ -171,19 +175,30 @@ async def check_market_hours(client: TelegramClient, bridge: DhanBridge):
                         await client.send_message(int(ADMIN_ID), '**Friday Square-Off Executed**')
                 except Exception as e:
                     logger.error(f'Square Off Failed: {e}')
-
                 await asyncio.sleep(65)
 
-        if current_time >= SHUTDOWN_TIME:
-            logger.info('Market Closed (3:30 PM). Disconnecting...')
-            await client.disconnect()  # pyright: ignore[reportGeneralTypeIssues]
-            return
+        # 2. Overnight Sleep Logic
+        if current_time >= SHUTDOWN_TIME or current_time < START_TIME:
+            target_time = datetime.combine(now.date(), START_TIME)
+            if current_time >= SHUTDOWN_TIME:
+                target_time += timedelta(days=1)
 
-        await asyncio.sleep(30)
+            sleep_seconds = (target_time - now).total_seconds()
+            logger.info(
+                f'Market Closed. Sleeping for {sleep_seconds / 3600:.2f} hours until {target_time}'
+            )
+
+            while sleep_seconds > 0:
+                await asyncio.sleep(min(300, sleep_seconds))
+                sleep_seconds -= 300
+            logger.info('Good Morning! Resuming Market Monitoring...')
+
+        else:
+            await asyncio.sleep(60)
 
 
 # --- TELEGRAM HELPER FUNCTIONS ---
-async def resolve_channel(client: TelegramClient, target: str) -> Any:
+async def resolve_channel(client: TelegramClient, target: str):
     logger.info(f'Resolving channel: {target}')
 
     if str(target).lstrip('-').isdigit():
@@ -213,37 +228,26 @@ async def resolve_channel(client: TelegramClient, target: str) -> Any:
 
 
 class ChannelState:
-    """Manages pause/resume state for individual channels."""
-
     def __init__(self):
         self._paused_until: Dict[int, datetime] = {}
 
     def pause(self, channel_id: int):
-        """Pauses the channel until Midnight (Start of next day)."""
         now = datetime.now()
         end_of_day = now.replace(hour=23, minute=59, second=59, microsecond=999999)
-
         self._paused_until[channel_id] = end_of_day
-        logger.warning(
-            f'Channel {channel_id} PAUSED until End of Day ({end_of_day.strftime("%H:%M:%S")})'
-        )
+        logger.warning(f'⛔ Channel {channel_id} PAUSED until End of Day')
 
     def resume(self, channel_id: int):
-        """Manually resumes the channel."""
         if channel_id in self._paused_until:
             del self._paused_until[channel_id]
-            logger.info(f'Channel {channel_id} RESUMED manually.')
+            logger.info(f'✅ Channel {channel_id} RESUMED manually.')
 
     def is_paused(self, channel_id: int) -> bool:
-        """Checks if channel is paused. Auto-resumes if new day."""
         if channel_id not in self._paused_until:
             return False
-
         if datetime.now() > self._paused_until[channel_id]:
             del self._paused_until[channel_id]
-            logger.info(f'Channel {channel_id} Auto-Resumed (New Day Detected).')
             return False
-
         return True
 
 
@@ -253,29 +257,33 @@ class SignalBatcher:
         self.batch_dates: List[datetime] = []
         self._timer_task: Optional[asyncio.Task] = None
         self.bridge = bridge_instance
-        self.active_monitors = set()
+        self.active_monitors: Set[str] = set()
         self.channel_state = ChannelState()
 
-    async def add_message(self, text: str, dt: datetime, channel_id: int):
-        """Adds message if channel is active. Checks for Stop/Start keywords."""
+    # --- SAFETY CHECK ---
+    def kill_switch_hit(self) -> bool:
+        """Layer 1 Safety Check before parsing."""
+        realized = self.bridge.get_realized_pnl()
+        if realized <= -LOSS_LIMIT:
+            logger.critical(f'KILL SWITCH: Realized Loss {realized} hits limit {LOSS_LIMIT}')
+            self.bridge.check_kill_switch(LOSS_LIMIT)
+            return True
+        return False
 
+    async def add_message(self, text: str, dt: datetime, channel_id: int):
         clean_text = text.upper()
 
         if any(k in clean_text for k in RESUME_KEYWORDS):
             self.channel_state.resume(channel_id)
 
-        # 2. CHECK FOR PAUSE COMMANDS
-        # Check against the UPDATED, extended keyword list
         if any(k in clean_text for k in PAUSE_KEYWORDS):
-            logger.info(f'Pause Keyword Detected in Channel {channel_id}: "{text[:20]}..."')
+            logger.info(f'⚠️ Pause Keyword Detected in Channel {channel_id}')
             self.channel_state.pause(channel_id)
             return
 
-        # 3. CHECK IF CHANNEL IS PAUSED
         if self.channel_state.is_paused(channel_id):
             return
 
-        # 4. ADD TO BATCH
         self.batch_messages.append(text)
         self.batch_dates.append(dt)
 
@@ -284,21 +292,23 @@ class SignalBatcher:
 
         self._timer_task = asyncio.create_task(self._process_after_delay())
 
-    async def _retry_monitor(self, res: Dict[str, Any], reason: str):
-        symbol = res.get('trading_symbol')
-        entry = res.get('trigger_above')
+    async def _retry_monitor(self, res: Dict[str, Any], reason: str):        
+        symbol = res.get('trading_symbol', '')
+        entry = res.get('trigger_above', 0.0)
+
+        POLL_INTERVAL = 60
+        MAX_RETRIES = 15
 
         try:
             self.active_monitors.add(symbol)
             logger.info(f'Monitor Started: {symbol} | Reason: {reason} | Entry: {entry}')
 
-            for attempt in range(1, 16):
+            for attempt in range(1, MAX_RETRIES + 1):
                 if self.bridge.kill_switch_triggered:
-                    logger.warning(f'Monitor Stopped: {symbol} (Kill Switch Active)')
                     return
 
-                await asyncio.sleep(15)
-                logger.info(f'Polling {symbol} ({attempt}/60)...')
+                await asyncio.sleep(POLL_INTERVAL)
+                logger.info(f'Polling {symbol} ({attempt}/{MAX_RETRIES})...')
 
                 status = await asyncio.to_thread(self.bridge.execute_super_order, res)
 
@@ -306,7 +316,6 @@ class SignalBatcher:
                     logger.info(f'Trigger Hit! {symbol} Executed.')
                     return
                 elif status == 'ERROR':
-                    logger.error(f'Monitor aborted for {symbol} due to error.')
                     return
 
             logger.warning(f'Monitor Timed Out (15m): {symbol}. Signal Expired.')
@@ -317,6 +326,11 @@ class SignalBatcher:
     async def _process_after_delay(self):
         try:
             await asyncio.sleep(BATCH_DELAY_SECONDS)
+
+            # Check Kill Switch before processing
+            if self.kill_switch_hit():
+                return
+
             logger.info(f'Processing batch ({len(self.batch_messages)} msgs)...')
 
             try:
@@ -343,9 +357,7 @@ class SignalBatcher:
                     )
 
                     if symbol in self.active_monitors:
-                        logger.warning(
-                            f'Duplicate Signal ignored: {symbol} is already being monitored.'
-                        )
+                        logger.warning(f'Duplicate: {symbol} is already being monitored.')
                         continue
 
                     try:
@@ -404,6 +416,7 @@ async def main():
         await client.start()  # pyright: ignore[reportGeneralTypeIssues]
         logger.info('Telegram Connected')
 
+        # Start Market Monitor (with Sleep logic)
         asyncio.create_task(check_market_hours(client, bridge))
 
     except Exception as e:
@@ -437,7 +450,7 @@ async def main():
 
                 if text == '/status':
                     funds = bridge.get_funds()
-                    pnl = bridge.get_total_pnl()
+                    pnl = bridge.get_realized_pnl()
                     await event.reply(
                         f'**Bot Status**\n'
                         f'Funds: {funds:.2f}\n'
@@ -467,9 +480,9 @@ async def main():
         try:
             text = event.message.message
             if text:
-                # Pass chat_id to track pausing per channel
-                await batcher.add_message(text, event.message.date, event.chat_id)  # pyright: ignore[reportArgumentType]
-                logger.info(f'Received message ({len(text)} chars)')
+                if event.chat_id:
+                    await batcher.add_message(text, event.message.date, event.chat_id)
+                    logger.info(f'Received message ({len(text)} chars)')
         except Exception as e:
             logger.error(f'Handler Error: {e}', exc_info=True)
 
