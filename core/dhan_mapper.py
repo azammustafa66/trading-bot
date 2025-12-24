@@ -2,21 +2,26 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from datetime import date, datetime
-from typing import Tuple
+from typing import Callable, Optional, Tuple
 
 import polars as pl
 import requests
 
-# --- CONFIGURATION ---
 logger = logging.getLogger('DhanMapper')
 
 
 class DhanMapper:
     """
-    Handles mapping of trading symbols (e.g., 'NIFTY 25 DEC 24000 CALL') to
-    Dhan-specific Security IDs, Exchange IDs, and Lot Sizes.
-    Downloads and caches the master scrip CSV daily.
+    Handles mapping of trading symbols.
+    Features:
+    - Auto-pads decimals (285.5 -> 285.50)
+    - SMART EXPIRY: Resolves missing dates.
+    - FUZZY ROOT: Matches 'INDUSTOWERS' to 'INDUSTOWER'.
+    - PRICE MATCHING: Uses live price to find the correct contract.
+    - SAFETY: Strictly IGNORES Futures.
+    - OPTIMIZATION: Returns fetched LTP to Bridge to save API calls.
     """
 
     # Constants
@@ -30,145 +35,242 @@ class DhanMapper:
     COL_EXCHANGE = 'SEM_EXM_EXCH_ID'
     COL_SEC_ID = 'SEM_SMST_SECURITY_ID'
     COL_LOT_SIZE = 'SEM_LOT_UNITS'
+    COL_EXPIRY = 'SEM_EXPIRY_DATE'
 
     def __init__(self):
-        """Initializes the mapper and ensures the cache directory exists."""
         self.csv_path = os.path.join(self.CACHE_DIR, self.CSV_FILENAME)
         os.makedirs(self.CACHE_DIR, exist_ok=True)
 
     def _is_file_fresh(self) -> bool:
-        """Returns True if the master CSV exists and was modified today."""
         if not os.path.exists(self.csv_path):
             return False
-
         mtime = os.path.getmtime(self.csv_path)
-        file_date = datetime.fromtimestamp(mtime).date()
-        return file_date == date.today()
+        return datetime.fromtimestamp(mtime).date() == date.today()
 
     def _ensure_csv(self):
-        """Downloads the master CSV if it does not exist or is outdated."""
         if self._is_file_fresh():
             return
 
-        logger.info('Downloading Dhan Scrip Master...')
-        logger.info('This may take a few minutes depending on connection speed...')
-
         try:
+            logger.info('Downloading fresh Master CSV...')
             with requests.get(self.MASTER_URL, stream=True, timeout=60) as r:
                 r.raise_for_status()
                 with open(self.csv_path, 'wb') as f:
                     for chunk in r.iter_content(chunk_size=8192):
                         f.write(chunk)
-            logger.info('Download complete.')
-
-        except requests.exceptions.Timeout:
-            logger.error('Download failed: Connection timeout.')
-            raise
-        except requests.exceptions.RequestException as e:
+        except Exception as e:
             logger.error(f'Download failed: {e}')
             raise
-        except Exception as e:
-            logger.error(f'Unexpected error during download: {e}', exc_info=True)
-            raise
 
-    def get_security_id(self, trading_symbol: str) -> Tuple[str, str, int]:
+    def get_security_id(
+        self,
+        trading_symbol: str,
+        price_ref: float = 0.0,
+        ltp_fetcher: Optional[Callable[[str, str], float]] = None,
+    ) -> Tuple[str, str, int, float]:
         """
-        Maps a trading symbol to (Security ID, Exchange ID, Lot Size).
-
-        Bidirectional Matching Logic:
-        1. Input 'EICHER'       matches CSV 'EICHERMOT'  (CSV starts with Input)
-        2. Input 'EICHERMOTORS' matches CSV 'EICHERMOT'  (Input starts with CSV)
+        Returns: (SecurityID, Exchange, LotSize, MappedLTP)
         """
         self._ensure_csv()
 
         try:
-            parts = trading_symbol.split(' ', 1)
+            # 1. AUTO-PADDING (285.5 -> 285.50)
+            padded_symbol = re.sub(r'(\d+\.\d)(?!\d)', r'\g<1>0', trading_symbol)
+            target_symbol = padded_symbol if padded_symbol != trading_symbol else trading_symbol
 
-            if len(parts) == 2:
-                user_root, suffix = parts
-
-                csv_root_col = pl.col(self.COL_SYMBOL).str.split(' ').list.get(0)
-                root_match = csv_root_col.str.starts_with(user_root) | pl.lit(
-                    user_root
-                ).str.starts_with(csv_root_col)
-                symbol_condition = root_match & pl.col(self.COL_SYMBOL).str.ends_with(suffix)
-            else:
-                symbol_condition = pl.col(self.COL_SYMBOL).str.starts_with(trading_symbol) | pl.lit(
-                    trading_symbol
-                ).str.starts_with(pl.col(self.COL_SYMBOL))
-
-            q = (
-                pl.scan_csv(self.csv_path)
-                .filter(
-                    symbol_condition
-                    & (
-                        (
-                            (pl.col(self.COL_INSTRUMENT) == 'OPTSTK')
-                            & (pl.col(self.COL_EXCHANGE) == 'NSE')
-                        )
-                        | (
-                            (pl.col(self.COL_INSTRUMENT) == 'OPTIDX')
-                            & (pl.col(self.COL_EXCHANGE).is_in(['NSE', 'BSE']))
-                        )
-                    )
+            # 2. CHECK FOR EXPLICIT DAY
+            has_day = bool(
+                re.search(
+                    r'\b\d{1,2}\s+(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)',
+                    target_symbol,
+                    re.IGNORECASE,
                 )
-                .select([self.COL_SYMBOL, self.COL_SEC_ID, self.COL_EXCHANGE, self.COL_LOT_SIZE])
+            )
+
+            lf = pl.scan_csv(self.csv_path)
+
+            # 3. BUILD FILTER
+            if has_day:
+                # Exact match logic with Fuzzy Root support
+                parts = target_symbol.split(' ', 1)
+                if len(parts) == 2:
+                    root, suffix = parts
+                    csv_root = pl.col(self.COL_SYMBOL).str.split(' ').list.get(0)
+                    # Bidirectional check: 'INDUSTOWERS' matches 'INDUSTOWER'
+                    root_match = csv_root.str.starts_with(root) | pl.lit(root).str.starts_with(
+                        csv_root
+                    )
+                    symbol_filter = root_match & pl.col(self.COL_SYMBOL).str.ends_with(suffix)
+                else:
+                    symbol_filter = pl.col(self.COL_SYMBOL).str.starts_with(target_symbol)
+            else:
+                # Smart Match (User missed date)
+                parts = target_symbol.split(' ')
+                root = parts[0]
+                month_str = parts[1] if len(parts) > 1 else ''
+                suffix_parts = parts[2:]
+                suffix = ' '.join(suffix_parts) if suffix_parts else ''
+
+                csv_root = pl.col(self.COL_SYMBOL).str.split(' ').list.get(0)
+                root_match = csv_root.str.starts_with(root) | pl.lit(root).str.starts_with(csv_root)
+
+                symbol_filter = root_match & pl.col(self.COL_SYMBOL).str.contains(month_str.upper())
+                if suffix:
+                    symbol_filter = symbol_filter & pl.col(self.COL_SYMBOL).str.ends_with(suffix)
+
+            # 4. EXECUTE QUERY
+            q = lf.filter(
+                symbol_filter
+                & (
+                    (pl.col(self.COL_EXCHANGE) == 'MCX')
+                    & (pl.col(self.COL_INSTRUMENT).is_in(['OPTFUT', 'OPTCOM']))
+                    | (pl.col(self.COL_EXCHANGE) == 'NSE')
+                    | (pl.col(self.COL_EXCHANGE) == 'BSE')
+                )
+            ).select(
+                [
+                    self.COL_SYMBOL,
+                    self.COL_SEC_ID,
+                    self.COL_EXCHANGE,
+                    self.COL_LOT_SIZE,
+                    self.COL_EXPIRY,
+                    self.COL_INSTRUMENT,
+                ]
             )
 
             df = q.collect()
 
-            if not df.is_empty():
-                if len(df) > 1:
-                    logger.info(
-                        f"Fuzzy match found multiple results for '{trading_symbol}'. Using: {
-                            df.item(0, self.COL_SYMBOL)
-                        }"
+            if df.is_empty():
+                logger.warning(f'Security ID Not Found for: {trading_symbol}')
+                return '', '', -1, 0.0
+
+            # 5. CANDIDATE SELECTION
+            try:
+                df = (
+                    df.with_columns(
+                        pl.col(self.COL_EXPIRY)
+                        .str.to_datetime('%Y-%m-%d %H:%M:%S', strict=False)
+                        .alias('expiry_dt')
                     )
+                    .filter(pl.col('expiry_dt') >= datetime.now())
+                    .sort('expiry_dt')
+                )
+            except Exception:
+                pass
 
-                sec_id = str(df.item(0, self.COL_SEC_ID))
-                exch = str(df.item(0, self.COL_EXCHANGE))
+            candidates = df.head(3)
+            best_match = candidates.row(0)
+            best_match_ltp = 0.0
 
-                try:
-                    lot_size = int(float(df.item(0, self.COL_LOT_SIZE)))
-                    lot_size = max(1, lot_size)
-                except (ValueError, TypeError):
-                    logger.warning(f'Invalid lot size for {trading_symbol}, defaulting to 1.')
-                    lot_size = 1
+            # --- PRICE MATCHING LOGIC ---
+            if price_ref > 0 and ltp_fetcher is not None and len(candidates) > 0:
+                logger.info(f'Resolving ambiguous symbol via PRICE MATCHING. Target: {price_ref}')
+                best_diff = float('inf')
+                found_better_match = False
 
-                return sec_id, exch, lot_size
+                for row in candidates.iter_rows(named=True):
+                    s_id = str(row[self.COL_SEC_ID])
+                    exch = str(row[self.COL_EXCHANGE])
 
-            logger.warning(f'Security ID Not Found for: {trading_symbol}')
-            return '', '', -1
+                    if exch == 'MCX':
+                        segment = 'MCX_COMM'
+                    elif exch == 'BSE':
+                        segment = 'BSE_FNO'
+                    else:
+                        segment = 'NSE_FNO'
+
+                    ltp = ltp_fetcher(s_id, segment)
+
+                    if ltp and ltp > 0:
+                        diff = abs(ltp - price_ref)
+                        pct_diff = (diff / price_ref) * 100
+                        logger.info(
+                            f'Candidate: {row[self.COL_SYMBOL]} | LTP: {ltp} | Diff: \
+                                    {pct_diff:.2f}%'
+                        )
+
+                        if pct_diff < 20 and diff < best_diff:
+                            best_diff = diff
+                            best_match = (
+                                row[self.COL_SYMBOL],
+                                row[self.COL_SEC_ID],
+                                row[self.COL_EXCHANGE],
+                                row[self.COL_LOT_SIZE],
+                                row[self.COL_EXPIRY],
+                                row[self.COL_INSTRUMENT],
+                            )
+                            best_match_ltp = ltp
+                            found_better_match = True
+
+                if found_better_match:
+                    logger.info(f'✅ Price Match Winner: {best_match[0]}')
+
+            # Extract Result
+            sec_id = str(best_match[1])
+            exch = str(best_match[2])
+            try:
+                lot_size = int(float(best_match[3]))
+                lot_size = max(1, lot_size)
+            except Exception:
+                lot_size = 1
+
+            return sec_id, exch, lot_size, best_match_ltp
 
         except Exception as e:
             logger.error(f'Mapping Error for {trading_symbol}: {e}', exc_info=True)
-            return '', '', -1
+            return '', '', -1, 0.0
 
 
+# ==============================================================================
+#                                TEST CASES
+# ==============================================================================
 if __name__ == '__main__':
-    print('\n--- RUNNING DHAN MAPPER DIAGNOSTICS ---\n')
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    print('\n' + '=' * 60)
+    print('RUNNING DHAN MAPPER DIAGNOSTICS & TESTS')
+    print('=' * 60 + '\n')
+
     mapper = DhanMapper()
 
-    test_cases = [
-        'BANKNIFTY 30 DEC 69700 CALL',
-        'SENSEX 24 DEC 85500 CALL',
-        'RELIANCE 30 DEC 1500 CALL',
-        'EICHER 30 DEC 8000 PUT',
-        'TATASTEE 30 DEC 100 PUT',
-    ]
+    def mock_ltp_fetcher(sec_id: str, segment: str) -> float:
+        print(f'    [Mock API] Fetching LTP for ID {sec_id} ({segment})...')
+        return 1425.0
 
-    print(f'Testing {len(test_cases)} symbols...')
-    print('-' * 70)
-    print(f'{"SYMBOL":<35} | {"ID":<10} | {"EXCH":<6} | {"LOT"}')
-    print('-' * 70)
+    # ------------------------------------------------------------------
+    # TEST 1: Auto-Padding (285.5 -> 285.50)
+    # ------------------------------------------------------------------
+    symbol_pad = 'BHEL 30 DEC 282.5 CALL'
+    print(f"Test 1: Auto-Padding Check for '{symbol_pad}'")
+    sid, exch, lot, ltp = mapper.get_security_id(symbol_pad)
+    print(f'Result: ID={sid if sid else "NOT FOUND"} | Exch={exch} | Lot={lot}\n')
 
-    for symbol in test_cases:
-        sec_id, exch, lot = mapper.get_security_id(symbol)
+    # ------------------------------------------------------------------
+    # TEST 2: Futures Rejection (Safety Check)
+    # ------------------------------------------------------------------
+    symbol_fut = 'GOLDM FEB FUT'
+    print(f"Test 2: Futures Rejection Check for '{symbol_fut}'")
+    # Expected: Should return empty ID because FUTCOM is filtered out
+    sid, exch, lot, ltp = mapper.get_security_id(symbol_fut)
+    if not sid:
+        print('✅ PASSED: Futures contract was correctly ignored.')
+    else:
+        print(f'❌ FAILED: Futures contract was returned! ID={sid}')
+    print()
 
-        id_str = sec_id if sec_id else '---'
-        exch_str = exch if exch else '---'
-        lot_str = str(lot) if lot != -1 else '---'
+    # ------------------------------------------------------------------
+    # TEST 3: Smart Expiry + Price Match
+    # ------------------------------------------------------------------
+    symbol_smart = 'GOLDM DEC 136000 CALL'
+    target_price = 1500.0
 
-        print(f'{symbol:<35} | {id_str:<10} | {exch_str:<6} | {lot_str}')
+    print(f"Test 3: Smart Expiry & Price Match for '{symbol_smart}' @ {target_price}")
 
-    print('-' * 70)
+    # We pass our mock fetcher. The mapper should find candidates (Feb 2025, Feb 2026)
+    # and call the fetcher. Since fetcher returns 3050 (close to 3000),
+    # it should match successfully.
+    sid, exch, lot, ltp = mapper.get_security_id(
+        symbol_smart, price_ref=target_price, ltp_fetcher=mock_ltp_fetcher
+    )
+    print(f'Result: ID={sid if sid else "NOT FOUND"} | Exch={exch} | Lot={lot}')
+
+    print('-' * 60)

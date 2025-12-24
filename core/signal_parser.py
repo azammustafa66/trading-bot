@@ -4,63 +4,49 @@ import json
 import logging
 import os
 import re
-import sys
 from datetime import date, datetime, time
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
+from zoneinfo import ZoneInfo
 
-# --- 1. Import Setup ---
+# Ensure this utility exists in your project structure
 try:
-    from utils.generate_expiry_dates import (select_expiry_date,
-                                             select_expiry_label)
+    from utils.generate_expiry_dates import select_expiry_label
 except ImportError:
-    try:
-        sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        from utils.generate_expiry_dates import (select_expiry_date,
-                                                 select_expiry_label)
-    except ImportError:
-        # Fallback dummy functions for standalone testing
-        def select_expiry_date(underlying: str, reference_dt: Optional[datetime] = None) -> date:
-            return date.today()
-
-        def select_expiry_label(underlying: str, reference_dt: Optional[datetime] = None) -> str:
-            return 'TEST-EXPIRY'
+    # Fallback if file is missing (mostly for testing isolation)
+    def select_expiry_label(underlying, reference_dt):
+        return datetime.now().strftime('%d %b').upper()
 
 
-# --- 2. Configuration & Logging ---
 load_dotenv()
 
-try:
-    from zoneinfo import ZoneInfo
-
-    IST = ZoneInfo('Asia/Kolkata')
-except ImportError:
-    IST = None
-
+IST = ZoneInfo('Asia/Kolkata')
 logger = logging.getLogger('Parser')
-
 MARKET_OPEN_TIME = time(9, 15)
 DEDUPE_WINDOW_MINUTES = 15
 SIGNALS_JSONL = os.getenv('SIGNALS_JSONL', 'data/signals.jsonl')
 SIGNALS_JSON = os.getenv('SIGNALS_JSON', 'data/signals.json')
 
 # --- CONSTANTS & PATTERNS ---
-IGNORE_KEYWORDS = [
-    'RISK TRAIL',
-    'SAFE BOOK',
-    'IGNORE',
-    'BOOK PROFIT',
-    'EXIT',
-    'AVOID',
-    'SAFE TRADERS',
-    'FUT',
-    'FUTURE',
-    'FUTURES',
+IGNORE_PATTERNS = [
+    re.compile(r'\bRISK\s+TRAIL\b', re.IGNORECASE),
+    re.compile(r'\bSAFE\s+BOOK\b', re.IGNORECASE),
+    re.compile(r'\bIGNORE\b', re.IGNORECASE),
+    re.compile(r'\bBOOK\s+PROFIT\b', re.IGNORECASE),
+    re.compile(r'\bEXIT\b', re.IGNORECASE),
+    re.compile(r'\bAVOID\b', re.IGNORECASE),
+    re.compile(r'\bSAFE\s+TRADERS\b', re.IGNORECASE),
+    re.compile(r'\bFUT\b', re.IGNORECASE),
+    re.compile(r'\bFUTURES?\b', re.IGNORECASE),
+    re.compile(r'\bVERY\s+RISKY\b', re.IGNORECASE),
+    re.compile(r'HERO\s*ZERO|JACKPOT|ROCKET|EXPIRY\s*SPECIAL', re.IGNORECASE),
 ]
 
 # Pre-compiled Regex Patterns for Performance
-RE_POSITIONAL = re.compile(r'POSITIONAL|POSTIONAL|POSITION|LONG TERM|HOLD|POS', re.IGNORECASE)
+RE_POSITIONAL = re.compile(
+    r'\b(POSITIONAL|POSTIONAL|POSITION|LONG TERM|HOLD|POS|BTST)\b', re.IGNORECASE
+)
 RE_STOCK_NAME = re.compile(
     r'(?:BUY|SELL)\s+([A-Z0-9\s\&\-]+?)\s+(\d+(?:\.\d+)?)\s*(?:CE|PE|C|P|CALL|PUT)', re.IGNORECASE
 )
@@ -155,6 +141,14 @@ def is_price_only(text: str) -> bool:
     return all(RE_DIGITS_ONLY.fullmatch(ln) for ln in lines)
 
 
+def should_ignore(text: str) -> bool:
+    """Checks text against compiled ignore patterns."""
+    for pattern in IGNORE_PATTERNS:
+        if pattern.search(text):
+            return True
+    return False
+
+
 def parse_single_block(text: str, reference_date: Optional[date] = None) -> Dict[str, Any]:
     """Parses a single block of text into a structured signal dictionary."""
     clean_text = text.strip().upper()
@@ -174,8 +168,8 @@ def parse_single_block(text: str, reference_date: Optional[date] = None) -> Dict
         'expiry_label': None,
     }
 
-    # 1. Fast Fail Filters
-    if not clean_text or is_price_only(clean_text) or any(k in clean_text for k in IGNORE_KEYWORDS):
+    # 1. Fast Fail Filters (Including Futures Check)
+    if not clean_text or is_price_only(clean_text) or should_ignore(clean_text):
         out['ignore'] = True
         return out
 
@@ -247,6 +241,8 @@ def parse_single_block(text: str, reference_date: Optional[date] = None) -> Dict
             logger.warning(f'Symbol Gen Failed: {e}')
             out['ignore'] = True
     else:
+        # If we couldn't parse Strike/Option Type, it's ignored anyway.
+        # This handles Futures implicitly (no strike), but explicit ignore is safer.
         out['ignore'] = True
 
     return out
@@ -302,12 +298,19 @@ def process_and_save(
         if not text:
             continue
 
+        # Check ignore list early to avoid buffering garbage
+        if should_ignore(text):
+            # If the current line is garbage, we still might be in the middle of a buffer.
+            # But if the line says "AVOID", we usually want to kill the whole buffer.
+            # For now, we treat it as a flush trigger to clear context.
+            flush_buffer()
+            continue
+
         is_start_keyword = detect_positional(text)
         has_action = bool(re.search(r'\b(BUY|SELL)\b', text.upper()))
         has_symbol = detect_underlying(text) is not None
         is_strong_new = is_start_keyword or (has_action and has_symbol)
 
-        is_ignore_line = any(k in text.upper() for k in IGNORE_KEYWORDS)
         is_price_noise = is_price_only(text)
         buffer_is_partial = is_partial_signal(buffer) if buffer else False
 
@@ -327,9 +330,9 @@ def process_and_save(
             else:
                 should_flush = True
         elif buffer_is_partial:
-            should_flush = is_ignore_line
+            should_flush = False
         else:
-            should_flush = is_ignore_line or is_price_noise
+            should_flush = is_price_noise
 
         if should_flush:
             flush_buffer()
@@ -404,15 +407,13 @@ if __name__ == '__main__':
         'Buy Banknifty 58700 ce above 420',
         'sl 385',
         'target 550.... 650',
+        'BUY GOLDM FEB FUT',
     ]
 
     test_dates = [mock_now for _ in test_stream]
 
     results = process_and_save(
-        test_stream,
-        test_dates,
-        jsonl_path='test_signals.jsonl',
-        json_path='test_signals.json',
+        test_stream, test_dates, jsonl_path='test_signals.jsonl', json_path='test_signals.json'
     )
 
     print(f'\nProcessed {len(results)} signals.\n')
