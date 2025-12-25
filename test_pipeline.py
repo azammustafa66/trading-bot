@@ -1,5 +1,6 @@
-from core.dhan_bridge import DhanBridge
 import logging
+
+from core.dhan_bridge import DhanBridge
 
 # Setup simple logging
 logging.basicConfig(level=logging.INFO)

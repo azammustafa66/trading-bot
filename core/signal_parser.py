@@ -6,9 +6,9 @@ import os
 import re
 from datetime import date, datetime, time
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
-from zoneinfo import ZoneInfo
 
 # Ensure this utility exists in your project structure
 try:
@@ -180,7 +180,8 @@ def parse_single_block(text: str, reference_date: Optional[date] = None) -> Dict
     if 'BUY' in clean_text:
         out['action'] = 'BUY'
     elif 'SELL' in clean_text:
-        out['action'] = 'SELL'
+        out['ignore'] = True
+        return out
 
     out['underlying'] = detect_underlying(text)
 

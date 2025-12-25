@@ -5,7 +5,8 @@ import math
 import os
 import time
 from datetime import datetime, timedelta
-from typing import Any, Dict, Optional, Tuple
+from threading import Lock
+from typing import Any, Dict, Tuple
 
 import numpy as np
 import requests
@@ -13,30 +14,19 @@ import talib
 from dhanhq import dhanhq
 from dotenv import load_dotenv
 
+from core.depth_feed import DepthFeed
 from core.dhan_mapper import DhanMapper
+from core.trade_manager import TradeManager
 
 logger = logging.getLogger('DhanBridge')
 load_dotenv()
 
 
 class DhanBridge:
-    # --- RISK CONFIG ---
-    RISK_PER_TRADE_POSITIONAL = 0.02
-    RISK_PER_TRADE_INTRADAY = 0.015
-    MIN_SL_POINTS = 5.0
-
-    # --- ATR CONFIG ---
+    RISK_PER_TRADE_INTRA = 0.015
     ATR_PERIOD = 14
-    ATR_LOOKBACK_DAYS_POS = 3
-    ATR_LOOKBACK_DAYS_INTRA = 3
-    ATR_INTERVAL_POS = 15
+    FUNDS_CACHE_TTL = 30
     ATR_INTERVAL_INTRA = 5
-
-    # --- MULTIPLIERS ---
-    SL_MULTIPLIER = 3.0
-    # TRAIL_MULTIPLIER not used in fixed % logic, kept for fallback
-    TRAIL_MULTIPLIER_POS = 1.3
-    TRAIL_MULTIPLIER_INTRA = 1.1
 
     def __init__(self):
         self.client_id = os.getenv('DHAN_CLIENT_ID')
@@ -45,6 +35,11 @@ class DhanBridge:
         self.kill_switch_triggered = False
         self.session = requests.Session()
         self.mapper = DhanMapper()
+        self.trade_manager = TradeManager()
+        self._funds_cache: Tuple[float, float] = (0.0, 0.0)
+        self._pending_orders: set[str] = set()
+        self._pending_lock = Lock()
+        self.depth_cache: Dict[str, Dict[str, Any]] = {}
 
         if self.access_token and self.client_id:
             self.session.headers.update(
@@ -57,348 +52,260 @@ class DhanBridge:
             )
             try:
                 self.dhan = dhanhq(self.client_id, self.access_token)
-                logger.info('Dhan Bridge Connected')
-            except Exception as e:
-                logger.error(f'DhanHQ Init Failed: {e}')
+                self.feed = DepthFeed(self.access_token, self.client_id)
+                self.feed.register_callback(self._on_depth_update)
+                logger.info('✅ Dhan Bridge Ready')
+            except Exception:
                 self.dhan = None
         else:
             self.dhan = None
-            logger.warning('Running in MOCK mode')
 
-    # ------------------------------------------------------------------
-    @staticmethod
-    def round_to_tick(price: float, tick: float = 0.05) -> float:
-        return round(round(price / tick) * tick, 2)
+    # --- DATA FEED ---
+    def _on_depth_update(self, data: Dict[str, Any]):
+        sid = str(data['security_id'])
+        side = str(data.get('side', ''))
+        levels = data.get('levels', [])
+        if sid not in self.depth_cache:
+            self.depth_cache[sid] = {'bid': [], 'ask': [], 'ltp': 0.0}
+        self.depth_cache[sid][side] = levels
 
-    # ------------------------------------------------------------------
+        bids, asks = self.depth_cache[sid].get('bid'), self.depth_cache[sid].get('ask')
+        if bids and asks:
+            self.depth_cache[sid]['ltp'] = (float(bids[0]['price']) + float(asks[0]['price'])) / 2
+
+    def get_live_ltp(self, security_id: str) -> float:
+        return float(self.depth_cache.get(security_id, {}).get('ltp', 0.0))
+
+    def get_order_imbalance(self, security_id: str) -> float:
+        """Calculates Imbalance with ANTI-SPOOFING Logic."""
+        if security_id not in self.depth_cache:
+            return 1.0
+        data = self.depth_cache[security_id]
+        bids, asks = data.get('bid', []), data.get('ask', [])
+        if not bids or not asks:
+            return 1.0
+
+        buy_vol = sum(int(x['qty']) for x in bids[:10])
+        sell_vol = sum(int(x['qty']) for x in asks[:10])
+
+        # Ignore Fake Walls (>60% volume at top level)
+        if buy_vol > 0 and int(bids[0]['qty']) > (buy_vol * 0.60):
+            buy_vol -= int(bids[0]['qty'])
+        if sell_vol > 0 and int(asks[0]['qty']) > (sell_vol * 0.60):
+            sell_vol -= int(asks[0]['qty'])
+
+        if sell_vol == 0:
+            return 5.0
+        return round(buy_vol / sell_vol, 2)
+
+    # --- UTILS ---
     def get_funds(self) -> float:
+        now = time.time()
+        cached, ts = self._funds_cache
+        if now - ts < self.FUNDS_CACHE_TTL:
+            return cached
         try:
+            # LIVE FUNDS (Uncomment for Production)
             data = self.session.get(f'{self.base_url}/fundlimit', timeout=5).json()
-            return float(data.get('sodLimit', 0.0))
+            funds = float(data.get('sodLimit', 0.0))
+
+            # MOCK FUNDS (Comment out for Production)
+            # funds = 150000.0
+
+            self._funds_cache = (funds, now)
+            return funds
         except Exception:
-            return 0.0
+            return cached
 
-    # ------------------------------------------------------------------
-    def get_ltp(self, security_id: str, exchange_segment: str) -> Optional[float]:
-        """
-        Fetches the Last Traded Price (LTP) with retries.
-        """
-        # Try 3 times (Total wait ~1.5s max)
-        for attempt in range(1, 4):
-            try:
-                payload = {exchange_segment: [int(security_id)]}
-                response = self.session.post(
-                    f'{self.base_url}/marketfeed/ltp', json=payload, timeout=5
-                )
-                data = response.json()
-
-                # Check validity
-                if 'data' not in data or exchange_segment not in data['data']:
-                    # logger.warning(f"LTP Empty (ID: {security_id}, Att: {attempt})")
-                    time.sleep(0.5)
-                    continue
-
-                price = float(data['data'][exchange_segment][str(security_id)]['last_price'])
-                return price
-
-            except Exception as e:
-                logger.warning(f'LTP Error (ID: {security_id}, Att: {attempt}): {e}')
-                time.sleep(0.5)
-
-        logger.error(f'❌ Failed to fetch LTP for ID {security_id} after retries.')
-        return None
-
-    # ------------------------------------------------------------------
-    def calculate_quantity(
-        self, entry: float, sl: float, is_positional: bool, lot_size: int
-    ) -> int:
+    def fetch_atr(self, sec_id: str, segment: str, symbol: str) -> float:
         try:
-            funds = self.get_funds()
-            risk_pct = (
-                self.RISK_PER_TRADE_POSITIONAL if is_positional else self.RISK_PER_TRADE_INTRADAY
-            )
-
-            risk_amount = funds * risk_pct
-            sl_points = abs(entry - sl)
-
-            if sl_points <= 0.05:
-                return 0
-
-            max_qty_by_risk = math.floor(risk_amount / sl_points)
-            num_lots = math.floor(max_qty_by_risk / lot_size)
-
-            if num_lots < 1:
-                logger.warning(
-                    f'Risk Too High: Cap {risk_amount:.2f} < Risk {sl_points * lot_size:.2f}'
-                )
-                return 0
-
-            return int(num_lots * lot_size)
-        except Exception as e:
-            logger.error(f'Qty Calc Error: {e}')
-            return 0
-
-    # ------------------------------------------------------------------
-    def fetch_atr(self, sec_id: str, segment: str, symbol: str, is_positional: bool) -> float:
-        try:
-            # --- Instrument Type Logic ---
-            if segment == 'MCX_COMM':
-                inst_type = 'OPTFUT'
-            else:
-                is_index = any(
-                    x in symbol.upper() for x in ['NIFTY', 'BANKNIFTY', 'SENSEX', 'FINNIFTY']
-                )
-                inst_type = 'OPTIDX' if is_index else 'OPTSTK'
-            # -----------------------------
-
-            interval = self.ATR_INTERVAL_POS if is_positional else self.ATR_INTERVAL_INTRA
-            lookback = self.ATR_LOOKBACK_DAYS_POS if is_positional else self.ATR_LOOKBACK_DAYS_INTRA
-
+            is_index = any(x in symbol.upper() for x in ['NIFTY', 'BANKNIFTY', 'SENSEX'])
+            inst_type = 'OPTIDX' if is_index else 'OPTSTK'
             to_date = datetime.now()
-            from_date = to_date - timedelta(days=lookback)
+            from_date = to_date - timedelta(days=5)
 
             payload = {
                 'securityId': str(sec_id),
                 'exchangeSegment': segment,
                 'instrument': inst_type,
-                'interval': interval,
+                'interval': self.ATR_INTERVAL_INTRA,
                 'fromDate': from_date.strftime('%Y-%m-%d'),
                 'toDate': to_date.strftime('%Y-%m-%d'),
             }
-
             data = self.session.post(
                 f'{self.base_url}/charts/intraday', json=payload, timeout=4
             ).json()
-
-            if isinstance(data, dict) and len(data.get('high', [])) > self.ATR_PERIOD:
-                atr = talib.ATR(
-                    np.array(data['high'], float),
-                    np.array(data['low'], float),
-                    np.array(data['close'], float),
-                    timeperiod=self.ATR_PERIOD,
-                )[-1]
-                return float(atr) if not np.isnan(atr) else 0.0
-
-        except Exception as e:
-            logger.error(f'ATR Error: {e}')
-        return 0.0
-
-    # ------------------------------------------------------------------
-    def get_realized_pnl(self) -> float:
-        try:
-            data = self.session.get(f'{self.base_url}/positions', timeout=5).json()
-            if isinstance(data, dict):
-                data = data.get('data', [])
-            return sum(float(p.get('realizedProfit', 0)) for p in data)
+            if 'high' in data and len(data['high']) > self.ATR_PERIOD:
+                highs = np.array(data['high'], dtype=float)
+                lows = np.array(data['low'], dtype=float)
+                closes = np.array(data['close'], dtype=float)
+                atr_vals = talib.ATR(highs, lows, closes, timeperiod=self.ATR_PERIOD)
+                return float(atr_vals[-1]) if not np.isnan(atr_vals[-1]) else 0.0
         except Exception:
             return 0.0
+        return 0.0
 
-    # ------------------------------------------------------------------
-    def has_open_position(self, security_id: str) -> bool:
-        try:
-            response = self.session.get(f'{self.base_url}/positions', timeout=5)
-            data = response.json()
-
-            positions_list = []
-            if isinstance(data, list):
-                positions_list = data
-            elif isinstance(data, dict):
-                positions_list = data.get('data', [])
-
-            for p in positions_list:
-                if str(p.get('securityId')) == str(security_id):
-                    net_qty = int(p.get('netQty', 0))
-                    pos_type = p.get('positionType', 'CLOSED')
-
-                    if net_qty != 0 and pos_type != 'CLOSED':
-                        logger.info(
-                            f'Existing Position Found: {p.get("tradingSymbol")} | Qty: {net_qty}'
-                        )
-                        return True
-            return False
-        except Exception as e:
-            logger.error(f'Position Check Error: {e}')
-            return False
-
-    # ------------------------------------------------------------------
-    def check_kill_switch(self, loss_limit: float = 8000.0) -> bool:
+    def check_kill_switch(self) -> bool:
         if self.kill_switch_triggered:
             return True
-
-        realized = self.get_realized_pnl()
-
-        if realized <= -abs(loss_limit):
-            self.kill_switch_triggered = True
-            logger.critical(f'REALIZED LOSS LIMIT HIT: {realized}')
-            self.square_off_all()
-            try:
-                self.session.post(
-                    f'{self.base_url}/killswitch?killSwitchStatus=ACTIVATE', timeout=10
-                )
-            except Exception:
-                pass
-            return True
-
+        limit = float(os.getenv('LOSS_LIMIT', '8000.0'))
+        try:
+            pos = self.session.get(f'{self.base_url}/positions', timeout=5).json().get('data', [])
+            pnl = sum(
+                float(p.get('realizedProfit', 0)) + float(p.get('unrealizedProfit', 0)) for p in pos
+            )
+            if pnl <= -abs(limit):
+                self.kill_switch_triggered = True
+                logger.critical(f'🚨 KILL SWITCH: {pnl}')
+                self.square_off_all()
+                return True
+        except Exception:
+            pass
         return False
 
-    # ------------------------------------------------------------------
-    def square_off_all(self):
+    def square_off_single(self, security_id: str):
+        target = str(security_id)
+        found = False
         try:
-            positions = self.session.get(f'{self.base_url}/positions', timeout=10).json()
-            if isinstance(positions, dict):
-                positions = positions.get('data', [])
-
+            positions = self.session.get(f'{self.base_url}/positions').json().get('data', [])
             for p in positions:
-                qty = abs(int(p.get('netQty', 0)))
-                if qty == 0:
-                    continue
+                if str(p['securityId']) == target:
+                    qty = abs(int(p.get('netQty', 0)))
+                    if qty == 0:
+                        continue
+                    found = True
+                    action = 'SELL' if int(p.get('netQty', 0)) > 0 else 'BUY'
+                    self.session.post(
+                        f'{self.base_url}/orders',
+                        json={
+                            'dhanClientId': self.client_id,
+                            'transactionType': action,
+                            'exchangeSegment': p['exchangeSegment'],
+                            'productType': p['productType'],
+                            'orderType': 'MARKET',
+                            'securityId': target,
+                            'quantity': qty,
+                            'validity': 'DAY',
+                        },
+                    )
+                    logger.warning(f'🔫 Surgical Exit: {p["tradingSymbol"]}')
+                    break
 
-                action = 'SELL' if int(p.get('netQty', 0)) > 0 else 'BUY'
-
-                payload = {
-                    'dhanClientId': self.client_id,
-                    'transactionType': action,
-                    'exchangeSegment': p['exchangeSegment'],
-                    'productType': p['productType'],
-                    'orderType': 'MARKET',
-                    'securityId': p['securityId'],
-                    'quantity': qty,
-                    'validity': 'DAY',
-                }
-
-                self.session.post(f'{self.base_url}/orders', json=payload, timeout=5)
+            if found:
+                self.trade_manager.remove_trade(target)
+            else:
+                logger.info(f'⚠️ Position {target} not found (SL Hit?). Cleaning JSON.')
+                self.trade_manager.remove_trade(target)
 
         except Exception as e:
-            logger.error(f'Square Off Error: {e}', exc_info=True)
+            logger.error(f'Single SqOff Error: {e}')
 
-    # ------------------------------------------------------------------
+    def square_off_all(self):
+        try:
+            positions = self.session.get(f'{self.base_url}/positions').json().get('data', [])
+            for p in positions:
+                self.square_off_single(str(p['securityId']))
+        except Exception:
+            pass
+
+    # --- CORE EXECUTION ---
     def execute_super_order(self, signal: Dict[str, Any]) -> Tuple[float, str]:
         if not self.access_token:
             return 0.0, 'ERROR'
-
         if self.check_kill_switch():
+            return 0.0, 'KILL_SWITCH'
+
+        sym = signal.get('trading_symbol', '')
+        entry = float(signal.get('trigger_above') or 0.0)
+        parsed_sl = float(signal.get('stop_loss') or 0.0)
+        parsed_target = float(signal.get('target') or 0.0)
+        is_pos = signal.get('is_positional', False)
+
+        sec_id, exch, lot, ltp = self.mapper.get_security_id(sym, entry)
+        if not sec_id:
             return 0.0, 'ERROR'
+        sid_str = str(sec_id)
+
+        # ------------------------------------------------------------------
+        # 🛑 RECURSION GUARD (New)
+        # Checks if we already have this trade active in our JSON Ledger.
+        # This prevents duplicate buys if the Retry Loop fires multiple times.
+        # ------------------------------------------------------------------
+        existing_trade = self.trade_manager.get_trade(sid_str)
+        if existing_trade:
+            logger.info(f'🚫 Ignoring duplicate buy signal for {sym} (Trade already active)')
+            return 0.0, 'ALREADY_OPEN'
+
+        # Lock to prevent race conditions during rapid retries
+        with self._pending_lock:
+            if sid_str in self._pending_orders:
+                return 0.0, 'ERROR'
+            self._pending_orders.add(sid_str)
 
         try:
-            try:
-                trade_sym = signal.get('trading_symbol', '')
-                action = signal.get('action', 'BUY')
-                is_pos = signal.get('is_positional', False)
-                sym = signal.get('underlying', '')
-
-                entry = float(signal.get('trigger_above') or 0)
-                sl_price = float(signal.get('stop_loss') or 0)
-                raw_target = float(signal.get('target') or 0)
-
-                def ltp_wrapper(security_id: str, exchange_segment: str) -> float:
-                    # Uses robust get_ltp inside mapper
-                    result = self.get_ltp(security_id, exchange_segment)
-                    return result if result is not None else 0.0
-
-                # [FIX] Unpack 4 values including LTP
-                sec_id, exch_id, lot_size, mapped_ltp = self.mapper.get_security_id(
-                    trading_symbol=trade_sym, price_ref=entry, ltp_fetcher=ltp_wrapper
-                )
-            except Exception as e:
-                logger.critical(f'Mapping Error: {e}')
+            exch_seg = 'MCX_COMM' if exch == 'MCX' else 'NSE_FNO'
+            curr_ltp = (self.get_live_ltp(sid_str) if exch != 'MCX' else ltp) or 0.0
+            if curr_ltp == 0:
                 return 0.0, 'ERROR'
 
-            if not sec_id:
-                return 0.0, 'ERROR'
+            anchor = entry if entry > 0 else curr_ltp
+            if entry and curr_ltp > entry * 1.25:
+                return curr_ltp, 'PRICE_HIGH'
+            if entry and curr_ltp < entry:
+                return curr_ltp, 'PRICE_LOW'
 
-            if self.has_open_position(sec_id):
-                logger.info(f'Skipping {trade_sym}: Position already active.')
-                return 0.0, 'SUCCESS'
-
-            # --- Exchange Logic ---
-            if exch_id == 'MCX':
-                exch_seg = 'MCX_COMM'
-            elif exch_id == 'BSE':
-                exch_seg = 'BSE_FNO'
+            final_sl = 0.0
+            if parsed_sl > 0 and parsed_sl < anchor:
+                final_sl = parsed_sl
             else:
-                exch_seg = 'NSE_FNO'
+                atr = self.fetch_atr(sid_str, exch_seg, sym)
+                final_sl = anchor - max(atr * 2.0, anchor * 0.06, 15) if atr > 0 else anchor * 0.90
 
-            # --- [OPTIMIZATION] Use Mapped LTP if available ---
-            if mapped_ltp > 0:
-                ltp = mapped_ltp
-                # logger.info(f"Using Cached LTP: {ltp}")
-            else:
-                ltp = self.get_ltp(sec_id, exch_seg)
+            final_target = (
+                parsed_target
+                if parsed_target > anchor
+                else anchor + min((anchor - final_sl) * 3, anchor * 0.1)
+            )
 
-            if not ltp:
-                logger.error(f'Could not fetch LTP for {trade_sym}')
-                return 0.0, 'ERROR'
-
-            # --- Price Validation ---
-            if entry and ltp < entry:
-                return ltp, 'PRICE_LOW'
-            if entry and ltp > entry * 1.20:
-                return ltp, 'PRICE_HIGH'
-
-            # --- Dynamic Shift ---
-            drift = 0.0
-            if entry and ltp > entry:
-                drift = ltp - entry
-                if sl_price > 0:
-                    sl_price += drift
-                    logger.info(f'Late Entry! Shifting SL up by {drift:.2f}')
-
-            order_type = 'MARKET' if ltp >= entry else 'LIMIT'
-            anchor = entry or ltp
-
-            # Fetch ATR for Target Calculation (NOT used for Trailing Jump anymore)
-            atr = self.fetch_atr(str(sec_id), exch_seg, sym, is_pos)
-
-            # --- SL CALCULATION ---
-            if sl_price == 0:
-                if atr:
-                    sl_dist = atr * 2.0
-                else:
-                    sl_dist = anchor * 0.10
-                sl_dist = max(sl_dist, self.MIN_SL_POINTS)
-                sl_price = anchor - sl_dist
-
-            # --- TARGET ---
-            atr_mult = 30.0 if is_pos else 20.0
-            if raw_target == 0:
-                target_price = (anchor + (atr * atr_mult)) if atr else (anchor * 3.5)
-            else:
-                target_price = raw_target * 2.0
-
-            # --- [FIXED % TRAILING] ---
-            jump_amount = anchor * 0.05
-            trailing_jump = max(self.round_to_tick(jump_amount), 1.0)
-
-            logger.info(f'Trailing Config: Price {anchor} | Jump {trailing_jump} (5%)')
-
-            qty = self.calculate_quantity(anchor, sl_price, is_pos, lot_size)
+            risk_per_share = max(anchor - final_sl, 1.0)
+            risk_amount = self.get_funds() * 0.02
+            qty = math.floor(math.floor(risk_amount / risk_per_share) / lot) * lot
             if qty <= 0:
-                return ltp, 'ERROR'
+                return curr_ltp, 'ERROR'
+
+            prod_type = 'MARGIN' if is_pos else 'INTRADAY'
 
             payload = {
                 'dhanClientId': self.client_id,
-                'transactionType': action,
+                'transactionType': 'BUY',
                 'exchangeSegment': exch_seg,
-                'productType': 'MARGIN' if is_pos else 'INTRADAY',
-                'orderType': order_type,
-                'securityId': str(sec_id),
-                'quantity': qty,
+                'productType': prod_type,
+                'orderType': 'MARKET',
+                'securityId': sid_str,
+                'quantity': int(qty),
                 'price': 0.0,
                 'validity': 'DAY',
-                'targetPrice': self.round_to_tick(target_price),
-                'stopLossPrice': self.round_to_tick(sl_price),
-                'trailingJump': trailing_jump,
+                'stopLossPrice': round(final_sl, 2),
+                'targetPrice': round(final_target, 2),
+                'trailingJump': max(round(anchor * 0.05, 1), 1.0),
             }
 
-            resp = self.session.post(f'{self.base_url}/super/orders', json=payload, timeout=10)
+            logger.info(
+                f'🚀 Order: {sym} ({prod_type}) | Qty: {qty} | Entry: {anchor} | SL: {final_sl}'
+            )
+            resp = self.session.post(f'{self.base_url}/super/orders', json=payload, timeout=5)
 
             if resp.status_code in (200, 201):
-                logger.info(f'Order Placed Successfully: {trade_sym}')
-                return ltp, 'SUCCESS'
+                od = resp.json().get('data', {})
+                if od.get('orderId'):
+                    self.trade_manager.add_trade(signal, od, sid_str)
+                return curr_ltp, 'SUCCESS'
 
-            logger.error(f'Order Failed: {resp.text}')
-            return ltp, 'ERROR'
-
+            logger.error(f'Dhan Fail: {resp.text}')
+            return curr_ltp, 'ERROR'
         except Exception as e:
-            logger.critical(f'Execution Error: {e}', exc_info=True)
+            logger.error(f'Exec Error: {e}')
             return 0.0, 'ERROR'
+        finally:
+            with self._pending_lock:
+                self._pending_orders.discard(sid_str)
