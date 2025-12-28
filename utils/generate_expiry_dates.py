@@ -130,6 +130,37 @@ def select_expiry_label(underlying: str, reference_dt: Optional[datetime] = None
     return f'{d.day:02d} {d.strftime("%b").upper()}'
 
 
+def get_today() -> date:
+    """Wrapper for today's date to allow easy mocking/testing."""
+    return date.today()
+
+
+def is_expiry_today(expiry_dt: date) -> bool:
+    """Checks if the given expiry date matches today."""
+    return expiry_dt == get_today()
+
+
+def should_rollover(instrument_type: str, expiry_dt: date) -> bool:
+    """
+    Determines if we need to switch to the Next Month's contract.
+
+    RULES:
+    1. FUTIDX (NIFTY/BANKNIFTY): Return False.
+       - Indices are cash-settled and liquid until 3:30 PM on expiry day.
+
+    2. FUTSTK (Stocks): Return True IF today is Expiry.
+       - Stocks are physically settled. Brokers block retail new positions
+         on expiry day, so we must watch the next month.
+    """
+    if instrument_type == 'FUTIDX':
+        return False
+
+    if instrument_type == 'FUTSTK':
+        return is_expiry_today(expiry_dt)
+
+    return False
+
+
 # --- Testing Block ---
 if __name__ == '__main__':
     print('\n🗓️  EXPIRY DATE CALCULATOR (STOCKS vs BANKNIFTY)')

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 import os
 import re
@@ -7,15 +9,16 @@ from typing import Callable, Optional, Tuple
 import polars as pl
 import requests
 
+from utils.generate_expiry_dates import get_today, select_expiry_date
+
 logger = logging.getLogger('DhanMapper')
 
 
 class DhanMapper:
     CSV_URL = 'https://images.dhan.co/api-data/api-scrip-master.csv'
-    CSV_FILE = 'data/dhan_master.csv'
-
+    CSV_FILE = 'cache/dhan_master.csv'
+    COL_SEM_SM_ID = 'SEM_SMST_SECURITY_ID'
     COL_SEM_EXM_EXCH_ID = 'SEM_EXM_EXCH_ID'
-    COL_SEM_SMST_SECURITY_ID = 'SEM_SMST_SECURITY_ID'
     COL_SEM_TRADING_SYMBOL = 'SEM_TRADING_SYMBOL'
     COL_SEM_CUSTOM_SYMBOL = 'SEM_CUSTOM_SYMBOL'
     COL_SEM_EXPIRY_DATE = 'SEM_EXPIRY_DATE'
@@ -23,10 +26,11 @@ class DhanMapper:
     COL_SEM_LOT_UNITS = 'SEM_LOT_UNITS'
     COL_SEM_STRIKE_PRICE = 'SEM_STRIKE_PRICE'
     COL_SEM_OPTION_TYPE = 'SEM_OPTION_TYPE'
+    COL_SEM_TICK_SIZE = 'SEM_TICK_SIZE'
 
     def __init__(self):
-        if not os.path.exists('data'):
-            os.makedirs('data')
+        if not os.path.exists('cache'):
+            os.makedirs('cache', exist_ok=True)
         self._refresh_master_csv()
         self.df = self._load_csv()
 
@@ -42,13 +46,13 @@ class DhanMapper:
         except Exception as e:
             logger.error(f'CSV Download Error: {e}')
 
-    def _load_csv(self):
+    def _load_csv(self) -> pl.DataFrame:
         try:
-            # Load CSV and parse date column immediately
-            # We also ensure Strike Price is float for comparisons
-            return pl.read_csv(self.CSV_FILE, ignore_errors=True).with_columns(
-                pl.col(self.COL_SEM_EXPIRY_DATE).str.strptime(
-                    pl.Date, '%Y-%m-%d %H:%M:%S', strict=False
+            return pl.read_csv(
+                self.CSV_FILE, ignore_errors=True, infer_schema_length=10000
+            ).with_columns(
+                pl.col(self.COL_SEM_EXPIRY_DATE).str.to_date(
+                    format='%Y-%m-%d %H:%M:%S', strict=False
                 ),
                 pl.col(self.COL_SEM_STRIKE_PRICE).cast(pl.Float64, strict=False),
             )
@@ -59,203 +63,201 @@ class DhanMapper:
     def get_security_id(
         self,
         trading_symbol: str,
-        price_ref: float = 0,
-        ltp_fetcher: Optional[Callable[[str, str], float]] = None,
+        price_ref: float = 0.0,
+        ltp_fetcher: Optional[Callable[[str], float]] = None,
     ) -> Tuple[Optional[str], Optional[str], int, float]:
         """
-        Maps a trading symbol to Dhan Security ID.
-        Returns: (SecurityID, ExchangeID, LotSize, LTP)
+        Maps symbol to ID with detailed logging of the decision process.
         """
-        today = datetime.now().date()
+        if self.df.is_empty():
+            return None, None, 0, 0.0
 
-        # ---------------------------------------------------------
-        # 1. EXACT MATCH (Fastest)
-        # ---------------------------------------------------------
+        today = get_today()
+        logger.info(f"🔍 Mapping: '{trading_symbol}' | Ref Price: {price_ref}")
+
+        # 1. EXACT MATCH
         res = self.df.filter(
             (pl.col(self.COL_SEM_CUSTOM_SYMBOL) == trading_symbol)
-            & (~pl.col(self.COL_SEM_INSTRUMENT_NAME).str.contains('FUT'))
             & (pl.col(self.COL_SEM_EXPIRY_DATE) >= today)
         )
 
-        if res.height > 0:
+        if not res.is_empty():
+            row = res.row(0, named=True)
+            sid = str(row[self.COL_SEM_SM_ID])
+            logger.info(
+                f'✅ Exact Match Found: ID {sid} | Symbol: {row[self.COL_SEM_TRADING_SYMBOL]}'
+            )
             return (
-                str(res[0, self.COL_SEM_SMST_SECURITY_ID]),
-                str(res[0, self.COL_SEM_EXM_EXCH_ID]),
-                max(1, int(res[0, self.COL_SEM_LOT_UNITS] or 1)),
+                sid,
+                str(row[self.COL_SEM_EXM_EXCH_ID]),
+                int(row[self.COL_SEM_LOT_UNITS] or 1),
                 0.0,
             )
-
-        # ---------------------------------------------------------
-        # 2. SMART SEARCH (Robust Fallback)
-        # ---------------------------------------------------------
-        # Parse the signal string: e.g., "NIFTY 25 JAN 21000 CALL"
+        MONTHS = {
+            'JAN',
+            'FEB',
+            'MAR',
+            'APR',
+            'MAY',
+            'JUN',
+            'JUL',
+            'AUG',
+            'SEP',
+            'OCT',
+            'NOV',
+            'DEC',
+        }
+        # 2. SMART REGEX SEARCH
         try:
             parts = trading_symbol.upper().split()
-
-            # Heuristics extraction
             strike = None
             opt_type = None
             underlying = None
 
             for p in parts:
-                # Detect Strike (Number)
                 if re.match(r'^\d+(\.\d+)?$', p):
                     strike = float(p)
-                # Detect Option Type
                 elif p in ['CE', 'CALL']:
-                    opt_type = 'CALL'
+                    opt_type = 'CE'
                 elif p in ['PE', 'PUT']:
-                    opt_type = 'PUT'
-                # Detect Underlying (skip dates/months)
-                elif p not in [
-                    'JAN',
-                    'FEB',
-                    'MAR',
-                    'APR',
-                    'MAY',
-                    'JUN',
-                    'JUL',
-                    'AUG',
-                    'SEP',
-                    'OCT',
-                    'NOV',
-                    'DEC',
-                ] and not re.match(r'^\d+$', p):
-                    # Usually the first part is underlying
+                    opt_type = 'PE'
+                elif p not in MONTHS and not re.match(r'^\d+$', p):
                     if not underlying:
                         underlying = p
 
-            # FIX 1: Ensure strict type safety for 'underlying' (must be str, not None)
+            logger.info(f'🧩 Regex Parsed: {underlying} | Strike: {strike} | Type: {opt_type}')
+
             if not strike or not opt_type or not underlying:
+                logger.warning(f'❌ Regex failed to extract full details from {trading_symbol}')
                 return None, None, 0, 0.0
 
-            # Note: Dhan CSV 'SEM_OPTION_TYPE' is usually 'CE' or 'PE'
-            csv_opt = 'CE' if opt_type == 'CALL' else 'PE'
-
             smart_res = self.df.filter(
-                (pl.col(self.COL_SEM_CUSTOM_SYMBOL).str.contains(underlying))
-                & (pl.col(self.COL_SEM_OPTION_TYPE) == csv_opt)
-                & (pl.col(self.COL_SEM_STRIKE_PRICE) == strike)
+                (
+                    pl.col(self.COL_SEM_CUSTOM_SYMBOL).str.contains(
+                        rf'\b{underlying}\b', literal=False
+                    )
+                )
+                & (pl.col(self.COL_SEM_OPTION_TYPE) == opt_type)
+                & (pl.col(self.COL_SEM_STRIKE_PRICE).round(2) == round(strike, 2))
                 & (pl.col(self.COL_SEM_EXPIRY_DATE) >= today)
             ).sort(self.COL_SEM_EXPIRY_DATE)
 
-            if smart_res.height > 0:
-                # FIX 2: Use direct DataFrame access [0, ColName] instead of row object
-                # This ensures we get scalars (str/int) and satisfies Pylance
+            if smart_res.is_empty():
+                logger.warning(f'No candidates found in CSV for {underlying} {strike} {opt_type}')
+                return None, None, 0, 0.0
 
-                s_id = str(smart_res[0, self.COL_SEM_SMST_SECURITY_ID])
-                e_id = str(smart_res[0, self.COL_SEM_EXM_EXCH_ID])
+            logger.info(f'Found {smart_res.height} candidates. Analyzing...')
 
-                # Handle lot size safely (convert from potential None/int to int)
-                raw_lot = smart_res[0, self.COL_SEM_LOT_UNITS]
-                lot_size = int(raw_lot) if raw_lot else 1
+            # 3. SMART PRICE MATCHING
+            final_row = None
+            if smart_res.height > 1 and price_ref > 0 and ltp_fetcher:
+                best_diff = float('inf')
+                candidates = smart_res.head(3)
 
-                return (s_id, e_id, max(1, lot_size), 0.0)
+                for i in range(candidates.height):
+                    row = candidates.row(i, named=True)
+                    sid = str(row[self.COL_SEM_SM_ID])
+                    expiry = row[self.COL_SEM_EXPIRY_DATE]
+
+                    try:
+                        try:
+                            live_price = ltp_fetcher(sid)
+                        except TypeError:
+                            live_price = ltp_fetcher(sid)
+                    except Exception:
+                        live_price = 0.0
+
+                    logger.info(
+                        f'   ⚖️ Candidate {i + 1}: Expiry {expiry} | ID {sid} \
+                        | Live: {live_price} vs Ref: {price_ref}'
+                    )
+
+                    if live_price > 0:
+                        diff = abs(live_price - price_ref)
+                        if diff < best_diff and diff < (price_ref * 0.20):
+                            best_diff = diff
+                            final_row = row
+
+                if not final_row:
+                    logger.warning(
+                        'Price match failed (No price within 20%). Reverting to nearest.'
+                    )
+                else:
+                    logger.info(
+                        f'Smart Match Selected: ID {final_row[self.COL_SEM_SM_ID]} (Best Price Fit)'
+                    )
+
+            if not final_row:
+                final_row = smart_res.row(0, named=True)
+                logger.info(
+                    f'📍 Default Selection (Nearest Expiry): {final_row[self.COL_SEM_EXPIRY_DATE]}'
+                )
+
+            return (
+                str(final_row[self.COL_SEM_SM_ID]),
+                str(final_row[self.COL_SEM_EXM_EXCH_ID]),
+                int(final_row[self.COL_SEM_LOT_UNITS] or 1),
+                0.0,
+            )
 
         except Exception as e:
-            logger.warning(f'Smart Search Failed: {e}')
+            logger.error(f'Smart Search Error: {e}', exc_info=True)
 
         return None, None, 0, 0.0
 
-    def get_underlying_future_id(self, symbol: str) -> Tuple[Optional[str], Optional[str]]:
+    def get_underlying_future_id(self, symbol: str) -> Tuple[Optional[str], float]:
         """
-        Finds the Current Month Future ID for an Index Option.
-        Example: 'BANKNIFTY 43000 CE' -> 'BANKNIFTY NOV FUT' ID
+        Finds Future ID using UTILS Logic (Handles Rollover & Holidays).
         """
+        if self.df.is_empty():
+            return None, 0.0
+
+        underlying = symbol.split()[0].upper()
+        logger.info(f'🔮 Finding Future for {underlying}...')
+
         try:
-            clean = symbol.upper().replace('BUY', '').replace('SELL', '').strip()
-            if not clean:
-                return None, None
+            target_expiry = select_expiry_date(underlying)
+            target_month = target_expiry.month
+            target_year = target_expiry.year
+            logger.info(f'   📅 Target Rollover Date: {target_expiry}')
 
-            underlying = clean.split()[0]
-            current_date = datetime.now().date()
+            res = self.df.filter(
+                (pl.col(self.COL_SEM_TRADING_SYMBOL).str.starts_with(underlying))
+                & (pl.col(self.COL_SEM_INSTRUMENT_NAME).is_in(['FUTIDX', 'FUTSTK']))
+            ).sort(self.COL_SEM_EXPIRY_DATE)
 
-            res = (
-                self.df.filter(
-                    (pl.col(self.COL_SEM_TRADING_SYMBOL).str.contains(underlying))
-                    & (pl.col(self.COL_SEM_INSTRUMENT_NAME).is_in(['FUTIDX', 'FUTSTK']))
-                    & (pl.col(self.COL_SEM_EXPIRY_DATE) >= current_date)
-                )
-                .sort(self.COL_SEM_EXPIRY_DATE)
-                .head(1)
+            if res.is_empty():
+                return None, 0.0
+
+            candidate = None
+            target_future = res.filter(
+                (pl.col(self.COL_SEM_EXPIRY_DATE).dt.month() == target_month)
+                & (pl.col(self.COL_SEM_EXPIRY_DATE).dt.year() == target_year)
             )
 
-            if res.height > 0:
-                return (
-                    str(res[0, self.COL_SEM_SMST_SECURITY_ID]),
-                    str(res[0, self.COL_SEM_EXM_EXCH_ID]),
+            if not target_future.is_empty():
+                candidate = target_future.row(0, named=True)
+                logger.info(
+                    f'Found Target Future: {candidate[self.COL_SEM_TRADING_SYMBOL]} \
+                    (ID: {candidate[self.COL_SEM_SM_ID]})'
                 )
-            return None, None
+            else:
+                today = get_today()
+                fallback_res = res.filter(pl.col(self.COL_SEM_EXPIRY_DATE) >= today)
+                if not fallback_res.is_empty():
+                    candidate = fallback_res.row(0, named=True)
+                    logger.warning(
+                        f'   Target Future not found. Using Nearest: \
+                        {candidate[self.COL_SEM_TRADING_SYMBOL]}'
+                    )
+
+            if candidate:
+                return (
+                    str(candidate[self.COL_SEM_SM_ID]),
+                    float(candidate[self.COL_SEM_TICK_SIZE] or 0.05),
+                )
+
         except Exception as e:
             logger.error(f'Future Map Error: {e}')
-            return None, None
 
-
-# --- TEST SUITE (Included for verification) ---
-if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO)
-    mapper = DhanMapper()
-
-    # Test 1: Exact Match (Simulated)
-    print('Testing Mapper...')
-    # Add real symbol logic here if CSV is present
-
-    # --- Pylance Type Verification Mock ---
-    logging.basicConfig(level=logging.INFO)
-    m = DhanMapper()
-    # Pylance will now correctly identify the return tuple types
-    res = m.get_security_id('NIFTY 25000 CALL', 150.0, lambda x, y: 148.0)
-    print(f'Verified Result: {res}')
-
-    # ==============================================================================
-    #                                TEST CASES
-    # ==============================================================================
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-    print('\n' + '=' * 60)
-    print('RUNNING DHAN MAPPER DIAGNOSTICS & TESTS')
-    print('=' * 60 + '\n')
-
-    mapper = DhanMapper()
-
-    def mock_ltp_fetcher(sec_id: str, segment: str) -> float:
-        print(f'    [Mock API] Fetching LTP for ID {sec_id} ({segment})...')
-        return 1425.0
-
-    # ------------------------------------------------------------------
-    # TEST 1: Auto-Padding (285.5 -> 285.50)
-    # ------------------------------------------------------------------
-    symbol_pad = 'BHEL 30 DEC 282.5 CALL'
-    print(f"Test 1: Auto-Padding Check for '{symbol_pad}'")
-    sid, exch, lot, ltp = mapper.get_security_id(symbol_pad)
-    print(f'Result: ID={sid if sid else "NOT FOUND"} | Exch={exch} | Lot={lot}\n')
-
-    # ------------------------------------------------------------------
-    # TEST 2: Futures Rejection (Safety Check)
-    # ------------------------------------------------------------------
-    symbol_fut = 'GOLDM FEB FUT'
-    print(f"Test 2: Futures Rejection Check for '{symbol_fut}'")
-    # Expected: Should return empty ID because FUTCOM is filtered out
-    sid, exch, lot, ltp = mapper.get_security_id(symbol_fut)
-    if not sid:
-        print('✅ PASSED: Futures contract was correctly ignored.')
-    else:
-        print(f'❌ FAILED: Futures contract was returned! ID={sid}')
-    print()
-
-    # ------------------------------------------------------------------
-    # TEST 3: Smart Expiry + Price Match
-    # ------------------------------------------------------------------
-    symbol_smart = 'GOLDM DEC 136000 CALL'
-    target_price = 1500.0
-
-    print(f"Test 3: Smart Expiry & Price Match for '{symbol_smart}' @ {target_price}")
-
-    # We pass our mock fetcher. The mapper should find candidates (Feb 2025, Feb 2026)
-    # and call the fetcher. Since fetcher returns 3050 (close to 3000),
-    # it should match successfully.
-    sid, exch, lot, ltp = mapper.get_security_id(
-        symbol_smart, price_ref=target_price, ltp_fetcher=mock_ltp_fetcher
-    )
-    print(f'Result: ID={sid if sid else "NOT FOUND"} | Exch={exch} | Lot={lot}')
-
-    print('-' * 60)
+        return None, 0.0

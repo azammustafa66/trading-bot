@@ -32,8 +32,10 @@ class TradeManager:
             return {}
 
     def _save_trades(self):
-        with open(self.file_path, 'w') as f:
+        tmp = f'{self.file_path}.tmp'
+        with open(tmp, 'w') as f:
             json.dump(self.active_trades, f, indent=2)
+        os.replace(tmp, self.file_path)
 
     def add_trade(self, signal: Dict[str, Any], order_data: Dict[str, Any], sec_id: str):
         """
@@ -76,9 +78,11 @@ class TradeManager:
             logger.info(f'🗑️ Trade Removed: {sid}')
 
     def get_all_open_trades(self) -> List[Dict[str, Any]]:
-        self.active_trades = self._load_trades()
-        return list(self.active_trades.values())
+        with self._lock:
+            self.active_trades = self._load_trades()
+            return list(self.active_trades.values())
 
     def get_trade(self, sec_id: str) -> Optional[Dict[str, Any]]:
-        self.active_trades = self._load_trades()
-        return self.active_trades.get(str(sec_id))
+        with self._lock:
+            self.active_trades = self._load_trades()
+            return self.active_trades.get(str(sec_id))
