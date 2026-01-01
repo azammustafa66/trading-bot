@@ -46,7 +46,7 @@ class TradeManager:
         is_call = 'CE' in symbol or 'CALL' in symbol
         is_put = 'PE' in symbol or 'PUT' in symbol
 
-        trade_id = str(sec_id)  # Use Security ID as key for easy lookup
+        trade_id = str(sec_id)
 
         entry_data = {
             'symbol': symbol,
@@ -66,7 +66,7 @@ class TradeManager:
         with self._lock:
             self.active_trades[trade_id] = entry_data
             self._save_trades()
-        logger.info(f'📝 Trade Logged: {symbol} (ID: {sec_id})')
+        logger.info(f'Trade Logged: {symbol} (ID: {sec_id})')
 
     def remove_trade(self, sec_id: str):
         """Removes a trade from the ledger (after exit)."""
@@ -75,7 +75,7 @@ class TradeManager:
             with self._lock:
                 del self.active_trades[sid]
                 self._save_trades()
-            logger.info(f'🗑️ Trade Removed: {sid}')
+            logger.info(f'Trade Removed: {sid}')
 
     def get_all_open_trades(self) -> List[Dict[str, Any]]:
         with self._lock:

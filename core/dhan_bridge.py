@@ -31,6 +31,7 @@ class DhanBridge:
     ATR_PERIOD = 14
     FUNDS_CACHE_TTL = 30
     ATR_INTERVAL_INTRA = 5
+    ATR_INTERVAL_POS = 15
 
     def __init__(self):
         logger.info('Initializing DhanBridge...')
@@ -39,18 +40,12 @@ class DhanBridge:
         self.base_url = 'https://api.dhan.co/v2'
         self.kill_switch_triggered = False
         self.session = requests.Session()
-
-        # Helper classes
         self.mapper = DhanMapper()
         self.trade_manager = TradeManager()
-
-        # State management
         self._funds_cache: Tuple[float, float] = (0.0, 0.0)
         self._pending_orders: set[str] = set()
         self._pending_lock = Lock()
         self.depth_cache: Dict[str, Dict[str, Any]] = {}
-
-        # Async Feed Management
         self.feed_loop = asyncio.new_event_loop()
         self.feed_thread = threading.Thread(target=self._start_feed_thread, daemon=True)
 
@@ -142,13 +137,13 @@ class DhanBridge:
         if not bids or not asks:
             return 1.0
 
-        buy_vol = sum(int(x['qty']) for x in bids[:10])
-        sell_vol = sum(int(x['qty']) for x in asks[:10])
+        buy_vol = sum(int(x['qty']) for x in bids[:12])
+        sell_vol = sum(int(x['qty']) for x in asks[:12])
 
-        # Anti-Spoofing: Reduce weight of top level if it's too large (>60% of total)
-        if buy_vol > 0 and int(bids[0]['qty']) > (buy_vol * 0.60):
+        # Anti-Spoofing: Reduce weight of top level if it's too large (>70% of total)
+        if buy_vol > 0 and int(bids[0]['qty']) >= (buy_vol * 0.70):
             buy_vol -= int(bids[0]['qty'])
-        if sell_vol > 0 and int(asks[0]['qty']) > (sell_vol * 0.60):
+        if sell_vol > 0 and int(asks[0]['qty']) >= (sell_vol * 0.70):
             sell_vol -= int(asks[0]['qty'])
 
         if sell_vol <= 0:
@@ -160,24 +155,27 @@ class DhanBridge:
 
     # --- UTILS ---
     def get_funds(self) -> float:
-        now = time.time()
-        cached, ts = self._funds_cache
-        if now - ts < self.FUNDS_CACHE_TTL:
-            return cached
-        try:
-            # LIVE FUNDS
-            logger.debug('Fetching live funds...')
-            data = self.session.get(f'{self.base_url}/fundlimit', timeout=5).json()
-            funds = float(data.get('sodLimit', 0.0))
+        # now = time.time()
+        # cached, ts = self._funds_cache
+        # if now - ts < self.FUNDS_CACHE_TTL:
+        #     return cached
+        # try:
+        #     # LIVE FUNDS
+        #     logger.debug('Fetching live funds...')
+        #     data = self.session.get(f'{self.base_url}/fundlimit', timeout=5).json()
+        #     funds = float(data.get('sodLimit', 0.0))
 
-            self._funds_cache = (funds, now)
-            logger.info(f'💰 Funds Available: {funds}')
-            return funds
-        except Exception as e:
-            logger.error(f'Failed to fetch funds: {e}')
-            return cached
+        #     self._funds_cache = (funds, now)
+        #     logger.info(f'💰 Funds Available: {funds}')
+        #     return funds
+        # except Exception as e:
+        #     logger.error(f'Failed to fetch funds: {e}')
+        #     return cached
 
-    def fetch_atr(self, sec_id: str, segment: str, symbol: str) -> float:
+        # temp for testing
+        return 150000.0
+
+    def fetch_atr(self, sec_id: str, segment: str, symbol: str, is_pos: bool) -> float:
         try:
             is_index = any(x in symbol.upper() for x in ['NIFTY', 'BANKNIFTY', 'SENSEX'])
             inst_type = 'OPTIDX' if is_index else 'OPTSTK'
@@ -188,14 +186,14 @@ class DhanBridge:
                 'securityId': str(sec_id),
                 'exchangeSegment': segment,
                 'instrument': inst_type,
-                'interval': self.ATR_INTERVAL_INTRA,
+                'interval': '10' if is_pos else '5',
                 'fromDate': from_date.strftime('%Y-%m-%d'),
                 'toDate': to_date.strftime('%Y-%m-%d'),
             }
-            resp = self.session.post(f'{self.base_url}/charts/intraday', json=payload, timeout=4)
+            resp = self.session.post(f'{self.base_url}/charts/intraday', json=payload, timeout=10)
             data = resp.json()
 
-            if 'high' in data and len(data['high']) > self.ATR_PERIOD:
+            if 'high' in data and len(data['high']) >= self.ATR_PERIOD:
                 highs = np.array(data['high'], dtype=float)
                 lows = np.array(data['low'], dtype=float)
                 closes = np.array(data['close'], dtype=float)
@@ -210,59 +208,75 @@ class DhanBridge:
             return 0.0
         return 0.0
 
-    def check_kill_switch(self) -> bool:
-        if self.kill_switch_triggered:
-            return True
+    # def check_kill_switch(self) -> bool:
+    #     if self.kill_switch_triggered:
+    #         return True
 
-        limit = float(os.getenv('LOSS_LIMIT', '8000.0'))
+    #     limit = 8000.0
 
+    #     try:
+    #         # 1. Get raw JSON response
+    #         resp = self.session.get(f'{self.base_url}/positions', timeout=5).json()
+
+    #         # 2. Handle both response formats:
+    #         # Format A: {'status': 'success', 'data': [...]}
+    #         # Format B: [...] (List directly)
+    #         if isinstance(resp, list):
+    #             pos_data = resp
+    #         else:
+    #             pos_data = resp.get('data', [])
+
+    #         # 3. Calculate PnL safely
+    #         pnl = 0.0
+    #         for p in pos_data:
+    #             # Ensure p is a dict before accessing
+    #             if isinstance(p, dict):
+    #                 pnl += float(p.get('realizedProfit', 0)) + float(p.get('unrealizedProfit', 0))
+
+    #         # 4. Check Limit
+    #         if pnl <= -abs(limit):
+    #             self.kill_switch_triggered = True
+    #             logger.critical(f'🚨 KILL SWITCH TRIGGERED: PnL {pnl} exceeded limit {limit}')
+    #             self.square_off_all()
+    #             return True
+
+    #     except Exception as e:
+    #         logger.error(f'Kill Switch Check Failed: {e}')
+    #         # Do not crash the bot, just assume False so trading continues
+    #         return False
+
+    #     return False
+
+    def get_super_orders(self) -> List[Dict[str, Any]]:
         try:
-            # 1. Get raw JSON response
-            resp = self.session.get(f'{self.base_url}/positions', timeout=5).json()
-
-            # 2. Handle both response formats:
-            # Format A: {'status': 'success', 'data': [...]}
-            # Format B: [...] (List directly)
-            if isinstance(resp, list):
-                pos_data = resp
-            else:
-                pos_data = resp.get('data', [])
-
-            # 3. Calculate PnL safely
-            pnl = 0.0
-            for p in pos_data:
-                # Ensure p is a dict before accessing
-                if isinstance(p, dict):
-                    pnl += float(p.get('realizedProfit', 0)) + float(p.get('unrealizedProfit', 0))
-
-            # 4. Check Limit
-            if pnl <= -abs(limit):
-                self.kill_switch_triggered = True
-                logger.critical(f'🚨 KILL SWITCH TRIGGERED: PnL {pnl} exceeded limit {limit}')
-                self.square_off_all()
-                return True
-
+            resp = self.session.get(f'{self.base_url}/super/orders', timeout=5)
+            if resp.status_code == 200:
+                return resp.json()
         except Exception as e:
-            logger.error(f'Kill Switch Check Failed: {e}')
-            # Do not crash the bot, just assume False so trading continues
-            return False
+            logger.error(f'Fetch Super Orders Failed: {e}')
+        return []
 
-        return False
+    def cancel_super_leg(self, order_id: str, leg: str):
+        try:
+            url = f'{self.base_url}/super/orders/{order_id}/{leg}'
+            resp = self.session.delete(url, timeout=3)
+            if resp.status_code == 202:
+                logger.info(f'✅ Cancelled {leg} for Super Order {order_id}')
+            else:
+                logger.warning(f'⚠️ Failed cancelling {leg}: {resp.text}')
+        except Exception as e:
+            logger.error(f'Cancel Super Leg Error: {e}')
 
-    def square_off_single(self, security_id: str):
-        target = str(security_id)
-        found = False
+    def _square_off_position_market(self, security_id: str):
         try:
             positions = self.session.get(f'{self.base_url}/positions').json().get('data', [])
             for p in positions:
-                if str(p['securityId']) == target:
+                if str(p['securityId']) == str(security_id):
                     qty = abs(int(p.get('netQty', 0)))
                     if qty == 0:
-                        continue
-                    found = True
-                    action = 'SELL' if int(p.get('netQty', 0)) > 0 else 'BUY'
+                        return
 
-                    logger.warning(f'🔫 Exiting Position: {p["tradingSymbol"]} Qty: {qty}')
+                    action = 'SELL' if int(p['netQty']) > 0 else 'BUY'
 
                     self.session.post(
                         f'{self.base_url}/orders',
@@ -272,41 +286,99 @@ class DhanBridge:
                             'exchangeSegment': p['exchangeSegment'],
                             'productType': p['productType'],
                             'orderType': 'MARKET',
-                            'securityId': target,
+                            'securityId': security_id,
                             'quantity': qty,
                             'validity': 'DAY',
                         },
                     )
-                    break
-
-            if found:
-                self.trade_manager.remove_trade(target)
-            else:
-                logger.info(
-                    f'ℹ️ Position {target} not found in open positions. Removing from manager.'
-                )
-                self.trade_manager.remove_trade(target)
-
+                    logger.warning(f'🔫 Market SqOff executed for {security_id}')
         except Exception as e:
-            logger.error(f'Single SqOff Error for {target}: {e}')
+            logger.error(f'Market SqOff Error: {e}')
+
+    def square_off_single(self, security_id: str):
+        sid = str(security_id)
+        super_orders = self.get_super_orders()
+
+        for so in super_orders:
+            if str(so.get('securityId')) != sid:
+                continue
+
+            order_id = so['orderId']
+            status = so.get('orderStatus')
+            leg_name = so.get('legName')  # noqa: F841
+
+            logger.warning(f'🧯 Exiting Super Order {order_id} | Status: {status}')
+
+            # ✅ CASE 1: ENTRY not yet fully traded
+            if status in ('PENDING', 'PART_TRADED'):
+                self.cancel_super_leg(order_id, 'ENTRY_LEG')
+                self.trade_manager.remove_trade(sid)
+                return
+
+            # ✅ CASE 2: ENTRY already traded → cancel SL & TARGET first
+            if status in ('TRADED', 'CLOSED'):
+                for leg in so.get('legDetails', []):
+                    if leg['legName'] in ('STOP_LOSS_LEG', 'TARGET_LEG'):
+                        if leg['orderStatus'] == 'PENDING':
+                            self.cancel_super_leg(order_id, leg['legName'])
+
+                # Now square off remaining position safely
+                self._square_off_position_market(sid)
+                self.trade_manager.remove_trade(sid)
+                return
+
+        logger.info(f'ℹ️ No Super Order found for {sid}')
+        self.trade_manager.remove_trade(sid)
 
     def square_off_all(self):
-        logger.warning('☢️ SQUARING OFF ALL POSITIONS ☢️')
+        logger.warning('☢️ GLOBAL SQUARE OFF INITIATED ☢️')
+
+        # 1️⃣ Handle Super Orders FIRST
+        super_orders = self.get_super_orders()
+
+        for so in super_orders:
+            order_id = so.get('orderId', '')
+            status = so.get('orderStatus', '')
+            sec_id = str(so.get('securityId', ''))
+
+            logger.warning(f'Handling Super Order {order_id} | {sec_id} | Status: {status}')
+
+            # ENTRY not traded yet
+            if status in ('PENDING', 'PART_TRADED'):
+                self.cancel_super_leg(order_id, 'ENTRY_LEG')
+                continue
+
+            # ENTRY traded → cancel SL & TARGET
+            if status in ('TRADED', 'CLOSED'):
+                for leg in so.get('legDetails', []):
+                    if leg['legName'] in ('STOP_LOSS_LEG', 'TARGET_LEG'):
+                        if leg['orderStatus'] == 'PENDING':
+                            self.cancel_super_leg(order_id, leg['legName'])
+
+        # Small wait to ensure cancellations propagate
+        time.sleep(0.5)
+
+        # 2️⃣ Now square off remaining positions safely
         try:
-            positions = self.session.get(f'{self.base_url}/positions').json().get('data', [])
+            positions = (
+                self.session.get(f'{self.base_url}/positions', timeout=5).json().get('data', [])
+            )
+
             for p in positions:
-                self.square_off_single(str(p['securityId']))
+                sid = str(p.get('securityId'))
+                self._square_off_position_market(sid)
+                self.trade_manager.remove_trade(sid)
+
         except Exception as e:
             logger.error(f'Square Off All Failed: {e}')
 
-    # --- CORE EXECUTION ---
     def execute_super_order(self, signal: Dict[str, Any]) -> Tuple[float, str]:
         if not self.access_token:
             logger.error('Token missing in execute_super_order')
             return 0.0, 'ERROR'
 
-        if self.check_kill_switch():
-            return 0.0, 'KILL_SWITCH'
+        # if self.check_kill_switch():
+        #     return 0.0, 'KILL_SWITCH'
 
         sym = signal.get('trading_symbol', '')
         logger.info(f'🔔 Processing Signal: {sym} | Type: {signal.get("type")}')
@@ -363,10 +435,9 @@ class DhanBridge:
                             logger.info(f'✅ WebSocket Tick Received: {curr_ltp}')
                             break
                 else:
-                    logger.info(f'ℹ️ Skipping WebSocket wait for {exch_seg} (No Depth Support)')
+                    logger.info(f'Skipping WebSocket wait for {exch_seg} (No Depth Support)')
 
                 # B. API Fallback (Ticker Data)
-                # If WS failed OR if we skipped it because it's BSE/MCX
                 if curr_ltp == 0:
                     try:
                         logger.info('Fetching via Ticker API...')
@@ -399,10 +470,10 @@ class DhanBridge:
 
             # --- EXECUTION LOGIC ---
             anchor = entry if entry > 0 else curr_ltp
-            atr = self.fetch_atr(sid_str, exch_seg, sym)
+            atr = self.fetch_atr(sid_str, exch_seg, sym, is_pos)
 
             entry_limit = anchor + min(atr * 1.5, anchor * 0.15) if atr > 0 else anchor * 1.10
-            # Price Logic Checks
+
             if entry and curr_ltp > entry_limit:
                 logger.warning(f'Price Too High: {curr_ltp} > Limit {entry_limit:.2f}')
                 return curr_ltp, 'PRICE_HIGH'
@@ -426,9 +497,10 @@ class DhanBridge:
 
             risk_per_share = max(anchor - final_sl, 1.0)
             risk_amount = self.get_funds() * 0.02
-            qty = math.floor(math.floor(risk_amount / risk_per_share) / lot) * lot
-            if qty <= 0:
-                qty = lot
+            qty = lot
+            # qty = math.floor(math.floor(risk_amount / risk_per_share) / lot) * lot
+            # if qty <= 0:
+            #     qty = lot
 
             prod_type = 'MARGIN' if is_pos else 'INTRADAY'
 
@@ -447,14 +519,23 @@ class DhanBridge:
                 'trailingJump': max(round(anchor * 0.05, 1), 1.0),
             }
 
-            logger.info(f'🚀 EXECUTING: {sym} | LTP: {curr_ltp} | Qty: {qty}')
+            logger.info(f'EXECUTING: {sym} | LTP: {curr_ltp} | Qty: {qty}')
 
             resp = self.session.post(f'{self.base_url}/super/orders', json=payload, timeout=5)
 
+            # --- RESPONSE PARSING FIX ---
             if resp.status_code in (200, 201):
-                od = resp.json().get('data', {})
-                if od.get('orderId'):
-                    self.trade_manager.add_trade(signal, od, sid_str)
+                raw_data = resp.json()
+
+                # Check 1: Wrapper
+                order_data = raw_data.get('data', {})
+
+                # Check 2: Root level
+                if not order_data and 'orderId' in raw_data:
+                    order_data = raw_data
+
+                if order_data.get('orderId'):
+                    self.trade_manager.add_trade(signal, order_data, sid_str)
                     return curr_ltp, 'SUCCESS'
 
             logger.error(f'Dhan API Fail: {resp.text}')

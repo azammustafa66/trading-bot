@@ -146,14 +146,15 @@ class DepthFeed:
                     HEADER_FMT, data, offset
                 )
 
-                start = offset + HEADER_SIZE
-                end = start + msg_len
+                end = offset + msg_len
 
                 if end > total_len:
-                    logger.warning('Incomplete binary frame received')
                     break
 
+                start = offset + HEADER_SIZE
+
                 payload = data[start:end]
+
                 offset = end
 
                 if feed_code in (FEED_DEPTH_BID, FEED_DEPTH_ASK):
