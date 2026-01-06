@@ -60,6 +60,24 @@ class DhanMapper:
             logger.error(f'CSV Load Error: {e}')
             return pl.DataFrame()
 
+    def get_instrument_type(self, security_id: str) -> str | None:
+        try:
+            row = self.df.filter(pl.col(self.COL_SEM_SM_ID) == security_id).select(
+                self.COL_SEM_INSTRUMENT_NAME
+            )
+
+            if row.is_empty():
+                return None
+
+            inst = row.item()
+            if inst in ('OPTIDX', 'OPTSTK'):
+                return inst
+
+        except Exception as e:
+            logger.warning(f'{e}')
+
+        return None
+
     def get_security_id(
         self,
         trading_symbol: str,
@@ -73,9 +91,8 @@ class DhanMapper:
             return None, None, 0, 0.0
 
         today = get_today()
-        logger.info(f"🔍 Mapping: '{trading_symbol}' | Ref Price: {price_ref}")
+        logger.info(f"Mapping: '{trading_symbol}' | Ref Price: {price_ref}")
 
-        # 1. EXACT MATCH
         res = self.df.filter(
             (pl.col(self.COL_SEM_CUSTOM_SYMBOL) == trading_symbol)
             & (pl.col(self.COL_SEM_EXPIRY_DATE) >= today)
@@ -85,7 +102,7 @@ class DhanMapper:
             row = res.row(0, named=True)
             sid = str(row[self.COL_SEM_SM_ID])
             logger.info(
-                f'✅ Exact Match Found: ID {sid} | Symbol: {row[self.COL_SEM_TRADING_SYMBOL]}'
+                f'Exact Match Found: ID {sid} | Symbol: {row[self.COL_SEM_TRADING_SYMBOL]}'
             )
             return (
                 sid,
@@ -107,7 +124,7 @@ class DhanMapper:
             'NOV',
             'DEC',
         }
-        # 2. SMART REGEX SEARCH
+
         try:
             parts = trading_symbol.upper().split()
             strike = None
@@ -125,10 +142,10 @@ class DhanMapper:
                     if not underlying:
                         underlying = p
 
-            logger.info(f'🧩 Regex Parsed: {underlying} | Strike: {strike} | Type: {opt_type}')
+            logger.info(f'Regex Parsed: {underlying} | Strike: {strike} | Type: {opt_type}')
 
             if not strike or not opt_type or not underlying:
-                logger.warning(f'❌ Regex failed to extract full details from {trading_symbol}')
+                logger.warning(f'Regex failed to extract full details from {trading_symbol}')
                 return None, None, 0, 0.0
 
             smart_res = self.df.filter(
@@ -190,7 +207,7 @@ class DhanMapper:
             if not final_row:
                 final_row = smart_res.row(0, named=True)
                 logger.info(
-                    f'📍 Default Selection (Nearest Expiry): {final_row[self.COL_SEM_EXPIRY_DATE]}'
+                    f'Default Selection (Nearest Expiry): {final_row[self.COL_SEM_EXPIRY_DATE]}'
                 )
 
             return (
@@ -213,7 +230,7 @@ class DhanMapper:
             return None, 0.0
 
         underlying = symbol.split()[0].upper()
-        logger.info(f'🔮 Finding Future for {underlying}...')
+        logger.info(f'Finding Future for {underlying}...')
 
         try:
             target_expiry = select_expiry_date(underlying)

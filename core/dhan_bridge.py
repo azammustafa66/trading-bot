@@ -35,8 +35,8 @@ class DhanBridge:
 
     def __init__(self):
         logger.info('Initializing DhanBridge...')
-        self.client_id = os.getenv('DHAN_CLIENT_ID')
-        self.access_token = os.getenv('DHAN_ACCESS_TOKEN')
+        self.client_id = os.getenv('DHAN_CLIENT_ID', '')
+        self.access_token = os.getenv('DHAN_ACCESS_TOKEN', '')
         self.base_url = 'https://api.dhan.co/v2'
         self.kill_switch_triggered = False
         self.session = requests.Session()
@@ -48,6 +48,7 @@ class DhanBridge:
         self.depth_cache: Dict[str, Dict[str, Any]] = {}
         self.feed_loop = asyncio.new_event_loop()
         self.feed_thread = threading.Thread(target=self._start_feed_thread, daemon=True)
+        self._imbalance_log_ts: Dict[str, float] = {}
 
         if self.access_token and self.client_id:
             self.session.headers.update(
@@ -114,18 +115,35 @@ class DhanBridge:
             asks = self.depth_cache[sid].get('ask')
 
             if bids and asks:
-                # Simple Mid-Price calculation for LTP
                 ltp = (float(bids[0]['price']) + float(asks[0]['price'])) / 2
                 self.depth_cache[sid]['ltp'] = ltp
-                # logger.debug(f"Tick {sid}: {ltp}") # Uncomment if you want spammy logs
+                # logger.debug(f"Tick {sid}: {ltp}")
         except Exception as e:
             logger.error(f'Error parsing depth update: {e}')
 
     def get_live_ltp(self, security_id: str) -> float:
         ltp = float(self.depth_cache.get(security_id, {}).get('ltp', 0.0))
         if ltp == 0.0:
-            logger.debug(f'⚠️ Zero LTP returned for {security_id}')
+            logger.debug(f'Zero LTP returned for {security_id}')
         return ltp
+
+    def get_liquidity_sids(self, sym: str, option_sid: str) -> List[str]:
+        sids = [option_sid]
+        sym_u = sym.upper()
+
+        if 'BANKNIFTY' in sym_u:
+            fut_sid, _ = self.mapper.get_underlying_future_id('BANKNIFTY')
+        elif 'NIFTY' in sym_u or 'SENSEX' in sym_u:
+            fut_sid, _ = self.mapper.get_underlying_future_id('NIFTY')
+        else:
+            underlying = sym.split()[0]
+            fut_sid, _ = self.mapper.get_underlying_future_id(underlying)
+
+        if fut_sid:
+            sids.append(str(fut_sid))
+            logger.info(f'Liquidity proxy added: FUT SID {fut_sid}')
+
+        return sids
 
     def get_order_imbalance(self, security_id: str) -> float:
         if security_id not in self.depth_cache:
@@ -137,10 +155,9 @@ class DhanBridge:
         if not bids or not asks:
             return 1.0
 
-        buy_vol = sum(int(x['qty']) for x in bids[:12])
-        sell_vol = sum(int(x['qty']) for x in asks[:12])
+        buy_vol = sum(int(x['qty']) for x in bids[:15])
+        sell_vol = sum(int(x['qty']) for x in asks[:15])
 
-        # Anti-Spoofing: Reduce weight of top level if it's too large (>70% of total)
         if buy_vol > 0 and int(bids[0]['qty']) >= (buy_vol * 0.70):
             buy_vol -= int(bids[0]['qty'])
         if sell_vol > 0 and int(asks[0]['qty']) >= (sell_vol * 0.70):
@@ -150,8 +167,40 @@ class DhanBridge:
             return 5.0
 
         imb = round(buy_vol / sell_vol, 2)
-        logger.info(f'⚖️ Imbalance {security_id}: {imb} (Buy: {buy_vol} | Sell: {sell_vol})')
+        now = time.time()
+        last_ts = self._imbalance_log_ts.get(security_id, 0)
+
+        if now - last_ts >= 45:
+            logger.info(f'⚖️ Imbalance {security_id}: {imb} (Buy: {buy_vol} | Sell: {sell_vol})')
+            self._imbalance_log_ts[security_id] = now
+
         return imb
+
+    def get_combined_imbalance(self, sids: List[str]) -> float:
+        """
+        Returns worst (minimum) imbalance across instruments.
+        Futures dominate liquidity → worst value wins.
+        """
+        imbalances = []
+
+        for sid in sids:
+            imb = self.get_order_imbalance(sid)
+            if imb > 0:
+                imbalances.append(imb)
+
+        if not imbalances:
+            return 1.0
+
+        return min(imbalances)
+
+    def get_futures_imbalance(self, sym: str, option_sid: str) -> float:
+        sids = self.get_liquidity_sids(sym, option_sid)
+
+        if len(sids) > 1:
+            fut_sid = sids[1]
+            return self.get_order_imbalance(fut_sid)
+
+        return self.get_order_imbalance(option_sid)
 
     # --- UTILS ---
     def get_funds(self) -> float:
@@ -176,37 +225,90 @@ class DhanBridge:
         return 150000.0
 
     def fetch_atr(self, sec_id: str, segment: str, symbol: str, is_pos: bool) -> float:
+        """
+        Robust ATR fetcher for options trading.
+
+        Guarantees:
+        - Correct instrument type
+        - Drops forming candle
+        - Handles insufficient data
+        - Applies conservative fallbacks
+        """
+
         try:
-            is_index = any(x in symbol.upper() for x in ['NIFTY', 'BANKNIFTY', 'SENSEX'])
-            inst_type = 'OPTIDX' if is_index else 'OPTSTK'
+            inst_type = self.mapper.get_instrument_type(sec_id)
+
+            if not inst_type:
+                logger.warning(f'ATR: Unknown instrument for {symbol}')
+                return self._atr_fallback(symbol)
+
+            interval = '10' if is_pos else '5'
+
             to_date = datetime.now()
-            from_date = to_date - timedelta(days=5)
+            from_date = to_date - timedelta(days=7)
 
             payload = {
                 'securityId': str(sec_id),
                 'exchangeSegment': segment,
                 'instrument': inst_type,
-                'interval': '10' if is_pos else '5',
+                'interval': interval,
+                'oi': False,
                 'fromDate': from_date.strftime('%Y-%m-%d'),
                 'toDate': to_date.strftime('%Y-%m-%d'),
             }
+
             resp = self.session.post(f'{self.base_url}/charts/intraday', json=payload, timeout=10)
+
             data = resp.json()
 
-            if 'high' in data and len(data['high']) >= self.ATR_PERIOD:
-                highs = np.array(data['high'], dtype=float)
-                lows = np.array(data['low'], dtype=float)
-                closes = np.array(data['close'], dtype=float)
-                atr_vals = talib.ATR(highs, lows, closes, timeperiod=self.ATR_PERIOD)
-                val = float(atr_vals[-1]) if not np.isnan(atr_vals[-1]) else 0.0
-                logger.info(f'📊 ATR for {symbol}: {val:.2f}')
-                return val
-            else:
-                logger.warning(f'⚠️ Insufficient ATR data for {symbol}')
+            highs = data.get('high', [])
+            lows = data.get('low', [])
+            closes = data.get('close', [])
+
+            if len(highs) < self.ATR_PERIOD + 1:
+                logger.warning(f'ATR: Insufficient candles ({len(highs)}) for {symbol}')
+                return self._atr_fallback(symbol)
+
+            highs = np.array(highs, dtype=float)
+            lows = np.array(lows, dtype=float)
+            closes = np.array(closes, dtype=float)
+
+            atr_series = talib.ATR(highs, lows, closes, timeperiod=self.ATR_PERIOD)
+
+            # Drop last candle (still forming)
+            atr_series = atr_series[:-1]
+
+            if len(atr_series) == 0 or np.isnan(atr_series[-1]):
+                logger.warning(f'ATR NaN for {symbol}')
+                return self._atr_fallback(symbol)
+
+            atr = float(atr_series[-1])
+
+            ltp = self.get_live_ltp(str(sec_id))
+            if ltp > 0:
+                atr = min(atr, ltp * 0.25)
+                atr = max(atr, ltp * 0.01)
+
+            logger.info(f'ATR for {symbol}: {atr:.2f}')
+            return atr
+
         except Exception as e:
-            logger.error(f'ATR Fetch Error for {symbol}: {e}')
-            return 0.0
-        return 0.0
+            logger.error(f'ATR Fetch Error for {symbol}: {e}', exc_info=True)
+            return self._atr_fallback(symbol)
+
+    def _atr_fallback(self, symbol: str) -> float:
+        """
+        Conservative fallback ATR when data is missing or invalid.
+        Designed for options safety.
+        """
+        # Index options
+        sym = symbol.upper()
+        if 'BANKNIFTY' in sym:
+            return 120.0
+        if 'NIFTY' in sym or 'SENSEX' in sym:
+            return 60.0
+
+        return 40.0
 
     # def check_kill_switch(self) -> bool:
     #     if self.kill_switch_triggered:
@@ -236,7 +338,7 @@ class DhanBridge:
     #         # 4. Check Limit
     #         if pnl <= -abs(limit):
     #             self.kill_switch_triggered = True
-    #             logger.critical(f'🚨 KILL SWITCH TRIGGERED: PnL {pnl} exceeded limit {limit}')
+    #             logger.critical(f'KILL SWITCH TRIGGERED: PnL {pnl} exceeded limit {limit}')
     #             self.square_off_all()
     #             return True
 
@@ -261,15 +363,20 @@ class DhanBridge:
             url = f'{self.base_url}/super/orders/{order_id}/{leg}'
             resp = self.session.delete(url, timeout=3)
             if resp.status_code == 202:
-                logger.info(f'✅ Cancelled {leg} for Super Order {order_id}')
+                logger.info(f'Cancelled {leg} for Super Order {order_id}')
             else:
-                logger.warning(f'⚠️ Failed cancelling {leg}: {resp.text}')
+                logger.warning(f'Failed cancelling {leg}: {resp.text}')
         except Exception as e:
             logger.error(f'Cancel Super Leg Error: {e}')
 
     def _square_off_position_market(self, security_id: str):
         try:
-            positions = self.session.get(f'{self.base_url}/positions').json().get('data', [])
+            resp = self.session.get(f'{self.base_url}/positions', timeout=5).json()
+            if isinstance(resp, list):
+                positions = resp
+            else:
+                positions = resp.get('data', [])
+
             for p in positions:
                 if str(p['securityId']) == str(security_id):
                     qty = abs(int(p.get('netQty', 0)))
@@ -277,26 +384,67 @@ class DhanBridge:
                         return
 
                     action = 'SELL' if int(p['netQty']) > 0 else 'BUY'
+                    payload = {
+                        'dhanClientId': self.client_id,
+                        'transactionType': action,
+                        'exchangeSegment': p['exchangeSegment'],
+                        'productType': p['productType'],
+                        'orderType': 'MARKET',
+                        'securityId': security_id,
+                        'quantity': qty,
+                        'validity': 'DAY',
+                    }
 
-                    self.session.post(
-                        f'{self.base_url}/orders',
-                        json={
-                            'dhanClientId': self.client_id,
-                            'transactionType': action,
-                            'exchangeSegment': p['exchangeSegment'],
-                            'productType': p['productType'],
-                            'orderType': 'MARKET',
-                            'securityId': security_id,
-                            'quantity': qty,
-                            'validity': 'DAY',
-                        },
-                    )
+                    self.session.post(f'{self.base_url}/orders', json=payload)
                     logger.warning(f'🔫 Market SqOff executed for {security_id}')
         except Exception as e:
             logger.error(f'Market SqOff Error: {e}')
 
     def square_off_single(self, security_id: str):
         sid = str(security_id)
+
+        if not self.trade_manager.get_trade(sid):
+            logger.info(f'Exit already processed for {sid}')
+            return
+
+        try:
+            for _ in range(5):
+                resp = self.session.get(f'{self.base_url}/positions', timeout=5).json()
+
+                if isinstance(resp, list):
+                    positions = resp
+                else:
+                    positions = resp.get('data', [])
+
+                for p in positions:
+                    if str(p.get('securityId')) == sid:
+                        qty = abs(int(p.get('netQty', 0)))
+                        if qty == 0:
+                            break
+
+                        action = 'SELL' if int(p['netQty']) > 0 else 'BUY'
+
+                        payload: Dict[str, (str | int | None)] = {
+                            'dhanClientId': self.client_id,
+                            'transactionType': action,
+                            'exchangeSegment': p['exchangeSegment'],
+                            'productType': p['productType'],
+                            'orderType': 'MARKET',
+                            'securityId': sid,
+                            'quantity': qty,
+                            'validity': 'DAY',
+                        }
+
+                        self.session.post(f'{self.base_url}/orders', json=payload, timeout=3)
+
+                        logger.critical(f'MARKET EXIT EXECUTED for {sid}')
+                        time.sleep(1)
+                        break
+                else:
+                    break
+        except Exception as e:
+            logger.error(f'Position square-off failed: {e}')
+
         super_orders = self.get_super_orders()
 
         for so in super_orders:
@@ -304,36 +452,20 @@ class DhanBridge:
                 continue
 
             order_id = so['orderId']
-            status = so.get('orderStatus')
-            leg_name = so.get('legName')  # noqa: F841
+            legs = so.get('legDetails', [])
 
-            logger.warning(f'🧯 Exiting Super Order {order_id} | Status: {status}')
+            for leg in legs:
+                if leg.get('orderStatus') == 'PENDING':
+                    self.cancel_super_leg(order_id, leg['legName'])
 
-            # ✅ CASE 1: ENTRY not yet fully traded
-            if status in ('PENDING', 'PART_TRADED'):
-                self.cancel_super_leg(order_id, 'ENTRY_LEG')
-                self.trade_manager.remove_trade(sid)
-                return
+            logger.info(f'Super Order cleaned: {order_id}')
+            break
 
-            # ✅ CASE 2: ENTRY already traded → cancel SL & TARGET first
-            if status in ('TRADED', 'CLOSED'):
-                for leg in so.get('legDetails', []):
-                    if leg['legName'] in ('STOP_LOSS_LEG', 'TARGET_LEG'):
-                        if leg['orderStatus'] == 'PENDING':
-                            self.cancel_super_leg(order_id, leg['legName'])
-
-                # Now square off remaining position safely
-                self._square_off_position_market(sid)
-                self.trade_manager.remove_trade(sid)
-                return
-
-        logger.info(f'ℹ️ No Super Order found for {sid}')
         self.trade_manager.remove_trade(sid)
 
     def square_off_all(self):
         logger.warning('☢️ GLOBAL SQUARE OFF INITIATED ☢️')
 
-        # 1️⃣ Handle Super Orders FIRST
         super_orders = self.get_super_orders()
 
         for so in super_orders:
@@ -343,26 +475,24 @@ class DhanBridge:
 
             logger.warning(f'Handling Super Order {order_id} | {sec_id} | Status: {status}')
 
-            # ENTRY not traded yet
             if status in ('PENDING', 'PART_TRADED'):
                 self.cancel_super_leg(order_id, 'ENTRY_LEG')
                 continue
 
-            # ENTRY traded → cancel SL & TARGET
             if status in ('TRADED', 'CLOSED'):
                 for leg in so.get('legDetails', []):
                     if leg['legName'] in ('STOP_LOSS_LEG', 'TARGET_LEG'):
                         if leg['orderStatus'] == 'PENDING':
                             self.cancel_super_leg(order_id, leg['legName'])
 
-        # Small wait to ensure cancellations propagate
         time.sleep(0.5)
 
-        # 2️⃣ Now square off remaining positions safely
         try:
-            positions = (
-                self.session.get(f'{self.base_url}/positions', timeout=5).json().get('data', [])
-            )
+            resp = self.session.get(f'{self.base_url}/positions', timeout=5).json()
+            if isinstance(resp, List):
+                positions = resp
+            else:
+                positions = resp.get('data', [])
 
             for p in positions:
                 sid = str(p.get('securityId'))
@@ -381,7 +511,7 @@ class DhanBridge:
         #     return 0.0, 'KILL_SWITCH'
 
         sym = signal.get('trading_symbol', '')
-        logger.info(f'🔔 Processing Signal: {sym} | Type: {signal.get("type")}')
+        logger.info(f'Processing Signal: {sym} | Type: {signal.get("type")}')
 
         entry = float(signal.get('trigger_above') or 0.0)
         parsed_sl = float(signal.get('stop_loss') or 0.0)
@@ -408,10 +538,9 @@ class DhanBridge:
             exch_seg = 'NSE_FNO'
             has_depth_feed = True
 
-        # 2. Duplicate Check
         existing_trade = self.trade_manager.get_trade(sid_str)
         if existing_trade:
-            logger.info(f'🚫 Duplicate signal ignored for {sym}')
+            logger.info(f'Duplicate signal ignored for {sym}')
             return 0.0, 'ALREADY_OPEN'
 
         with self._pending_lock:
@@ -420,7 +549,6 @@ class DhanBridge:
             self._pending_orders.add(sid_str)
 
         try:
-            # --- INTELLIGENT PRICE FETCHING ---
             curr_ltp = self.get_live_ltp(sid_str)
 
             if curr_ltp == 0:
@@ -432,7 +560,7 @@ class DhanBridge:
                         time.sleep(0.05)
                         curr_ltp = self.get_live_ltp(sid_str)
                         if curr_ltp > 0:
-                            logger.info(f'✅ WebSocket Tick Received: {curr_ltp}')
+                            logger.info(f'WebSocket Tick Received: {curr_ltp}')
                             break
                 else:
                     logger.info(f'Skipping WebSocket wait for {exch_seg} (No Depth Support)')
@@ -511,7 +639,7 @@ class DhanBridge:
                 'productType': prod_type,
                 'orderType': 'MARKET',
                 'securityId': sid_str,
-                'quantity': int(qty),
+                'quantity': qty,
                 'price': 0.0,
                 'validity': 'DAY',
                 'stopLossPrice': round(final_sl, 2),

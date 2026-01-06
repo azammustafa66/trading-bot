@@ -5,7 +5,7 @@ import logging
 import os
 import signal
 import sys
-from datetime import datetime, time
+from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from typing import Any, Dict, List, Optional, Set
 
@@ -15,8 +15,8 @@ from telethon import TelegramClient, events
 # --- IMPORT CORE MODULES ---
 try:
     from core.dhan_bridge import DhanBridge
-    from core.signal_parser import process_and_save
     from core.notifier import Notifier
+    from core.signal_parser import process_and_save
 except ImportError as e:
     sys.stderr.write(f'Import Error: {e}. Ensure you are running from the root directory.\n')
     sys.exit(1)
@@ -79,20 +79,6 @@ signal.signal(signal.SIGTERM, handle_shutdown_signal)
 signal.signal(signal.SIGINT, handle_shutdown_signal)
 
 
-# --- MARKET HOURS ---
-async def check_market_hours(client: TelegramClient, bridge: DhanBridge):
-    SHUTDOWN_TIME = time(15, 30)
-    logger.info('Market monitor started')
-
-    while True:
-        now = datetime.now()
-        if now.time() >= SHUTDOWN_TIME:
-            logger.info('Market closed. Disconnecting Telegram.')
-            await client.disconnect()  # pyright: ignore[reportGeneralTypeIssues]
-            return
-        await asyncio.sleep(30)
-
-
 # --- CHANNEL STATE ---
 class ChannelState:
     def __init__(self):
@@ -126,6 +112,7 @@ class SignalBatcher:
         self.batch_dates: List[datetime] = []
         self._timer: Optional[asyncio.Task] = None
         self._resume_active_trades()
+        self._subscribed_sids: Set[str] = set()
 
     def _resume_active_trades(self):
         trades = self.tm.get_all_open_trades()
@@ -199,35 +186,31 @@ class SignalBatcher:
                 await self.notifier.order_failed(sym, 'Execution error')
 
     async def _retry_monitor(self, sig: Dict[str, Any]):
-        """
-        Polls the price for 15 minutes to see if it enters the buy zone.
-        """
         sym = str(sig.get('trading_symbol', ''))
         entry = float(sig.get('trigger_above', 0))
 
-        # Get ID to subscribe
         sid, _, _, _ = self.bridge.mapper.get_security_id(sym, entry, self.bridge.get_live_ltp)
         if not sid:
             self.active_monitors.discard(sym)
             return
 
         sid_str = str(sid)
-        self.bridge.subscribe([{'ExchangeSegment': 'NSE_FNO', 'SecurityId': sid_str}])
+        liquidity_sids = self.bridge.get_liquidity_sids(sym, sid_str)
+        subs = [{'ExchangeSegment': 'NSE_FNO', 'SecurityId': s} for s in liquidity_sids]
+        self.bridge.subscribe(subs)
 
         try:
             cnt = 0
-            for _ in range(2000):
+            for _ in range(2400):
                 if self.bridge.kill_switch_triggered:
                     return
 
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(10.0)
 
                 ltp = self.bridge.get_live_ltp(sid_str)
                 if ltp == 0:
                     continue
 
-                # Check if price crosses entry
-                # We require 3 consecutive ticks above entry to confirm breakout
                 if ltp >= entry:
                     cnt += 1
                 else:
@@ -235,43 +218,71 @@ class SignalBatcher:
 
                 if cnt >= 3:
                     logger.info(f'⚡ Trigger Hit: {sym} ({ltp} >= {entry}). Executing!')
-                    # Execute
                     _, status = await asyncio.to_thread(self.bridge.execute_super_order, sig)
 
                     if status == 'SUCCESS':
-                        # Switch to Exit Monitor
-                        loop = asyncio.get_running_loop()
-                        loop.create_task(self._exit_monitor(sym, sid_str))
-                        return  # Exit the retry loop
-
-                    elif status == 'ALREADY_OPEN':
-                        return  # Stop monitoring
-
-                    # If failed for other reasons, keep monitoring or break?
-                    # Usually break to avoid spamming errors
+                        asyncio.get_running_loop().create_task(self._exit_monitor(sym, sid_str))
                     return
-
         finally:
             if not self.tm.get_trade(sid_str):
                 self.active_monitors.discard(sym)
 
+    def get_imbalance_rules(self, sym: str):
+        if 'NIFTY' in sym.upper() or 'BANKNIFTY' in sym.upper():
+            return {'bad_imb': 0.20, 'good_imb': 2.8, 'bad_ticks': 4}
+        else:
+            return {'bad_imb': 0.35, 'good_imb': 2.2, 'bad_ticks': 6}
+
     async def _exit_monitor(self, sym: str, sid: str):
-        if sym not in self.active_monitors:
-            self.bridge.subscribe([{'ExchangeSegment': 'NSE_FNO', 'SecurityId': sid}])
+        rules = self.get_imbalance_rules(sym)
+        bad_imb = rules['bad_imb']
+        good_imb = rules['good_imb']
+        bad_ticks_required = rules['bad_ticks']
+
+        bad_tick_count = 0
+
+        await asyncio.sleep(3)
+
+        liquidity_sids = self.bridge.get_liquidity_sids(sym, sid)
+        new_subs = []
+        for s in liquidity_sids:
+            if s not in self._subscribed_sids:
+                new_subs.append({'ExchangeSegment': 'NSE_FNO', 'SecurityId': s})
+                self._subscribed_sids.add(s)
+
+        if new_subs:
+            self.bridge.subscribe(new_subs)
 
         try:
             while True:
                 await asyncio.sleep(1)
+
                 trade = self.tm.get_trade(sid)
                 if not trade:
                     break
 
-                # Basic Imbalance Check
-                if self.bridge.get_order_imbalance(sid) < 0.3:
-                    await self.notifier.squared_off(sym, 'Liquidity dump')
-                    logger.critical(f'Liquidity dump: {sym}')
+                imb = self.bridge.get_combined_imbalance(liquidity_sids)
+
+                if imb >= good_imb:
+                    if bad_tick_count > 0:
+                        logger.info(f'💧 {sym} liquidity recovered ({imb}), resetting counter')
+                    bad_tick_count = 0
+                    continue
+
+                if imb < bad_imb:
+                    bad_tick_count += 1
+                    logger.warning(
+                        f'{sym} bad imbalance {imb:.2f} ({bad_tick_count}/{bad_ticks_required})'
+                    )
+                else:
+                    bad_tick_count = max(0, bad_tick_count - 1)
+
+                if bad_tick_count >= bad_ticks_required:
+                    await self.notifier.squared_off(sym, f'Liquidity collapse ({imb:.2f})')
+                    logger.critical(f'🧯 Liquidity collapse: {sym}')
                     self.bridge.square_off_single(sid)
                     break
+
         finally:
             self.active_monitors.discard(sym)
 
@@ -289,9 +300,6 @@ async def main():
     notifier = Notifier(client, ADMIN_ID)
     bridge = DhanBridge()
     batcher = SignalBatcher(bridge, notifier)
-
-    loop = asyncio.get_running_loop()
-    loop.create_task(check_market_hours(client, bridge))
 
     resolved = []
     for ch in TARGET_CHANNELS:
