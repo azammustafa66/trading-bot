@@ -12,7 +12,6 @@ from typing import Any, Dict, List, Optional, Set
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
 
-# --- IMPORT CORE MODULES ---
 try:
     from core.dhan_bridge import DhanBridge
     from core.notifier import Notifier
@@ -21,7 +20,6 @@ except ImportError as e:
     sys.stderr.write(f'Import Error: {e}. Ensure you are running from the root directory.\n')
     sys.exit(1)
 
-# --- CONFIGURATION ---
 load_dotenv()
 
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
@@ -155,7 +153,7 @@ class SignalBatcher:
         loop = asyncio.get_running_loop()
 
         for sig in signals:
-            sym = sig.get('trading_symbol')
+            sym = sig.get('trading_symbol', '')
             if not isinstance(sym, str):
                 continue
 
@@ -228,7 +226,7 @@ class SignalBatcher:
                 self.active_monitors.discard(sym)
 
     def get_imbalance_rules(self, sym: str):
-        if 'NIFTY' in sym.upper() or 'BANKNIFTY' in sym.upper():
+        if 'NIFTY' in sym.upper() or 'BANKNIFTY' in sym.upper() or 'SENSEX' in sym.upper():
             return {'bad_imb': 0.20, 'good_imb': 2.8, 'bad_ticks': 4}
         else:
             return {'bad_imb': 0.35, 'good_imb': 2.2, 'bad_ticks': 6}
@@ -245,10 +243,10 @@ class SignalBatcher:
 
         liquidity_sids = self.bridge.get_liquidity_sids(sym, sid)
         new_subs = []
-        for s in liquidity_sids:
-            if s not in self._subscribed_sids:
-                new_subs.append({'ExchangeSegment': 'NSE_FNO', 'SecurityId': s})
-                self._subscribed_sids.add(s)
+        for sid in liquidity_sids:
+            if sid not in self._subscribed_sids:
+                new_subs.append({'ExchangeSegment': 'NSE_FNO', 'SecurityId': sid})
+                self._subscribed_sids.add(sid)
 
         if new_subs:
             self.bridge.subscribe(new_subs)
@@ -300,6 +298,8 @@ async def main():
     notifier = Notifier(client, ADMIN_ID)
     bridge = DhanBridge()
     batcher = SignalBatcher(bridge, notifier)
+
+    await notifier.started_bot()
 
     resolved = []
     for ch in TARGET_CHANNELS:

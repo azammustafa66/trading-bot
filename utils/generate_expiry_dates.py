@@ -71,7 +71,7 @@ def select_expiry_date(underlying: str, reference_dt: Optional[datetime] = None)
         elif KOLKATA:
             now = now.astimezone(KOLKATA)
 
-    today = now.date()
+    today = date.today()
     u = underlying.strip().upper()
 
     calculated_date = today  # Default
@@ -132,7 +132,7 @@ def select_expiry_label(underlying: str, reference_dt: Optional[datetime] = None
 
 def get_today() -> date:
     """Wrapper for today's date to allow easy mocking/testing."""
-    return date.today()
+    return datetime.now(KOLKATA).date()
 
 
 def is_expiry_today(expiry_dt: date) -> bool:

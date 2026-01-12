@@ -9,6 +9,7 @@ from typing import Callable, Optional, Tuple
 import polars as pl
 import requests
 
+# Ensure this util returns date in IST
 from utils.generate_expiry_dates import get_today, select_expiry_date
 
 logger = logging.getLogger('DhanMapper')
@@ -17,6 +18,8 @@ logger = logging.getLogger('DhanMapper')
 class DhanMapper:
     CSV_URL = 'https://images.dhan.co/api-data/api-scrip-master.csv'
     CSV_FILE = 'cache/dhan_master.csv'
+
+    # Column Constants
     COL_SEM_SM_ID = 'SEM_SMST_SECURITY_ID'
     COL_SEM_EXM_EXCH_ID = 'SEM_EXM_EXCH_ID'
     COL_SEM_TRADING_SYMBOL = 'SEM_TRADING_SYMBOL'
@@ -35,14 +38,31 @@ class DhanMapper:
         self.df = self._load_csv()
 
     def _refresh_master_csv(self):
+        """
+        Refreshes CSV if it wasn't downloaded 'today'.
+        This prevents using yesterday's master file during morning trading.
+        """
         try:
+            should_download = True
             if os.path.exists(self.CSV_FILE):
-                if (datetime.now().timestamp() - os.path.getmtime(self.CSV_FILE)) < 86400:
-                    return
-            logger.info('Downloading Master Scrip CSV...')
-            resp = requests.get(self.CSV_URL)
-            with open(self.CSV_FILE, 'wb') as f:
-                f.write(resp.content)
+                # Get file modification time
+                mtime = os.path.getmtime(self.CSV_FILE)
+                file_date = datetime.fromtimestamp(mtime).date()
+
+                # Compare with current trading date (IST)
+                # If file matches today's date, we don't need to download
+                if file_date == get_today():
+                    should_download = False
+
+            if should_download:
+                logger.info('⬇️ Downloading Master Scrip CSV (New Day Detected)...')
+                resp = requests.get(self.CSV_URL, timeout=30)
+                with open(self.CSV_FILE, 'wb') as f:
+                    f.write(resp.content)
+                logger.info('✅ Download Complete.')
+            else:
+                logger.info("✅ Master CSV is fresh (Today's Cache).")
+
         except Exception as e:
             logger.error(f'CSV Download Error: {e}')
 
@@ -55,6 +75,7 @@ class DhanMapper:
                     format='%Y-%m-%d %H:%M:%S', strict=False
                 ),
                 pl.col(self.COL_SEM_STRIKE_PRICE).cast(pl.Float64, strict=False),
+                pl.col(self.COL_SEM_SM_ID).cast(pl.Utf8, strict=False),
             )
         except Exception as e:
             logger.error(f'CSV Load Error: {e}')
@@ -62,7 +83,7 @@ class DhanMapper:
 
     def get_instrument_type(self, security_id: str) -> str | None:
         try:
-            row = self.df.filter(pl.col(self.COL_SEM_SM_ID) == security_id).select(
+            row = self.df.filter(pl.col(self.COL_SEM_SM_ID) == str(security_id)).select(
                 self.COL_SEM_INSTRUMENT_NAME
             )
 
@@ -90,9 +111,11 @@ class DhanMapper:
         if self.df.is_empty():
             return None, None, 0, 0.0
 
+        # FIX: Use get_today() for consistency with IST
         today = get_today()
-        logger.info(f"Mapping: '{trading_symbol}' | Ref Price: {price_ref}")
+        logger.info(f"🔍 Mapping: '{trading_symbol}' | Ref Price: {price_ref}")
 
+        # 1. EXACT MATCH
         res = self.df.filter(
             (pl.col(self.COL_SEM_CUSTOM_SYMBOL) == trading_symbol)
             & (pl.col(self.COL_SEM_EXPIRY_DATE) >= today)
@@ -102,7 +125,7 @@ class DhanMapper:
             row = res.row(0, named=True)
             sid = str(row[self.COL_SEM_SM_ID])
             logger.info(
-                f'Exact Match Found: ID {sid} | Symbol: {row[self.COL_SEM_TRADING_SYMBOL]}'
+                f'✅ Exact Match Found: ID {sid} | Symbol: {row[self.COL_SEM_TRADING_SYMBOL]}'
             )
             return (
                 sid,
@@ -110,6 +133,7 @@ class DhanMapper:
                 int(row[self.COL_SEM_LOT_UNITS] or 1),
                 0.0,
             )
+
         MONTHS = {
             'JAN',
             'FEB',
@@ -125,6 +149,7 @@ class DhanMapper:
             'DEC',
         }
 
+        # 2. SMART REGEX SEARCH
         try:
             parts = trading_symbol.upper().split()
             strike = None
@@ -142,10 +167,10 @@ class DhanMapper:
                     if not underlying:
                         underlying = p
 
-            logger.info(f'Regex Parsed: {underlying} | Strike: {strike} | Type: {opt_type}')
+            logger.info(f'🧩 Regex Parsed: {underlying} | Strike: {strike} | Type: {opt_type}')
 
             if not strike or not opt_type or not underlying:
-                logger.warning(f'Regex failed to extract full details from {trading_symbol}')
+                logger.warning(f'❌ Regex failed to extract full details from {trading_symbol}')
                 return None, None, 0, 0.0
 
             smart_res = self.df.filter(
@@ -177,10 +202,7 @@ class DhanMapper:
                     expiry = row[self.COL_SEM_EXPIRY_DATE]
 
                     try:
-                        try:
-                            live_price = ltp_fetcher(sid)
-                        except TypeError:
-                            live_price = ltp_fetcher(sid)
+                        live_price = ltp_fetcher(sid)
                     except Exception:
                         live_price = 0.0
 
@@ -207,7 +229,7 @@ class DhanMapper:
             if not final_row:
                 final_row = smart_res.row(0, named=True)
                 logger.info(
-                    f'Default Selection (Nearest Expiry): {final_row[self.COL_SEM_EXPIRY_DATE]}'
+                    f'📍 Default Selection (Nearest Expiry): {final_row[self.COL_SEM_EXPIRY_DATE]}'
                 )
 
             return (
@@ -223,14 +245,15 @@ class DhanMapper:
         return None, None, 0, 0.0
 
     def get_underlying_future_id(self, symbol: str) -> Tuple[Optional[str], float]:
-        """
-        Finds Future ID using UTILS Logic (Handles Rollover & Holidays).
-        """
         if self.df.is_empty():
             return None, 0.0
 
         underlying = symbol.split()[0].upper()
-        logger.info(f'Finding Future for {underlying}...')
+        # Clean up Indices names if needed
+        if underlying == 'BANKNIFTY':
+            underlying = 'BANKNIFTY'
+
+        logger.info(f'🔮 Finding Future for {underlying}...')
 
         try:
             target_expiry = select_expiry_date(underlying)
@@ -259,13 +282,14 @@ class DhanMapper:
                     (ID: {candidate[self.COL_SEM_SM_ID]})'
                 )
             else:
+                # FIX: Use get_today() here as well
                 today = get_today()
                 fallback_res = res.filter(pl.col(self.COL_SEM_EXPIRY_DATE) >= today)
                 if not fallback_res.is_empty():
                     candidate = fallback_res.row(0, named=True)
                     logger.warning(
                         f'   Target Future not found. Using Nearest: \
-                        {candidate[self.COL_SEM_TRADING_SYMBOL]}'
+                            {candidate[self.COL_SEM_TRADING_SYMBOL]}'
                     )
 
             if candidate:

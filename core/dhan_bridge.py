@@ -13,7 +13,6 @@ from typing import Any, Dict, List, Tuple
 import numpy as np
 import requests
 import talib
-from dhanhq import dhanhq
 from dotenv import load_dotenv
 
 # Ensure these imports point to your actual file locations
@@ -60,8 +59,6 @@ class DhanBridge:
                 }
             )
             try:
-                self.dhan = dhanhq(self.client_id, self.access_token)
-
                 # Initialize Feed
                 logger.info('Connecting to Depth Feed...')
                 self.feed = DepthFeed(self.access_token, self.client_id)
@@ -158,18 +155,19 @@ class DhanBridge:
         buy_vol = sum(int(x['qty']) for x in bids[:15])
         sell_vol = sum(int(x['qty']) for x in asks[:15])
 
-        if buy_vol > 0 and int(bids[0]['qty']) >= (buy_vol * 0.70):
+        # Anti-spoofing
+        if buy_vol > 0 and int(bids[0]['qty']) >= buy_vol * 0.70:
             buy_vol -= int(bids[0]['qty'])
-        if sell_vol > 0 and int(asks[0]['qty']) >= (sell_vol * 0.70):
+        if sell_vol > 0 and int(asks[0]['qty']) >= sell_vol * 0.70:
             sell_vol -= int(asks[0]['qty'])
 
         if sell_vol <= 0:
             return 5.0
 
         imb = round(buy_vol / sell_vol, 2)
+
         now = time.time()
         last_ts = self._imbalance_log_ts.get(security_id, 0)
-
         if now - last_ts >= 45:
             logger.info(f'⚖️ Imbalance {security_id}: {imb} (Buy: {buy_vol} | Sell: {sell_vol})')
             self._imbalance_log_ts[security_id] = now
@@ -178,27 +176,43 @@ class DhanBridge:
 
     def get_combined_imbalance(self, sids: List[str]) -> float:
         """
-        Returns worst (minimum) imbalance across instruments.
-        Futures dominate liquidity → worst value wins.
+        Futures-first imbalance logic.
+        - Futures dominate direction
+        - Options only confirm or warn
+        - Prevents false exits during controlled option selling
         """
-        imbalances = []
 
-        for sid in sids:
-            imb = self.get_order_imbalance(sid)
-            if imb > 0:
-                imbalances.append(imb)
-
-        if not imbalances:
+        if not sids:
             return 1.0
 
-        return min(imbalances)
+        # Single instrument (no futures available)
+        if len(sids) == 1:
+            return self.get_order_imbalance(sids[0])
+
+        option_sid = sids[0]
+        fut_sid = sids[1]
+
+        opt_imb = self.get_order_imbalance(option_sid)
+        fut_imb = self.get_order_imbalance(fut_sid)
+
+        # --- INSTITUTIONAL LOGIC ---
+
+        # Futures are healthy → IGNORE option selling
+        if fut_imb >= 1.0:
+            return fut_imb
+
+        # Futures weak + options also weak → REAL danger
+        if fut_imb < 0.7 and opt_imb < 0.7:
+            return min(fut_imb, opt_imb)
+
+        # Futures weak but options not confirming → warning, not exit
+        return fut_imb
 
     def get_futures_imbalance(self, sym: str, option_sid: str) -> float:
         sids = self.get_liquidity_sids(sym, option_sid)
 
         if len(sids) > 1:
-            fut_sid = sids[1]
-            return self.get_order_imbalance(fut_sid)
+            return self.get_order_imbalance(sids[1])
 
         return self.get_order_imbalance(option_sid)
 
@@ -213,16 +227,13 @@ class DhanBridge:
         #     logger.debug('Fetching live funds...')
         #     data = self.session.get(f'{self.base_url}/fundlimit', timeout=5).json()
         #     funds = float(data.get('sodLimit', 0.0))
-
         #     self._funds_cache = (funds, now)
-        #     logger.info(f'💰 Funds Available: {funds}')
+        #     logger.info(f'Funds Available: {funds}')
         #     return funds
         # except Exception as e:
         #     logger.error(f'Failed to fetch funds: {e}')
         #     return cached
-
-        # temp for testing
-        return 150000.0
+        return 500000.0
 
     def fetch_atr(self, sec_id: str, segment: str, symbol: str, is_pos: bool) -> float:
         """
@@ -234,9 +245,13 @@ class DhanBridge:
         - Handles insufficient data
         - Applies conservative fallbacks
         """
-
         try:
-            inst_type = self.mapper.get_instrument_type(sec_id)
+            sym_u = symbol.upper()
+
+            if any(idx in sym_u for idx in ('NIFTY', 'BANKNIFTY', 'SENSEX')):
+                inst_type = 'OPTIDX'
+            else:
+                inst_type = 'OPTSTK'
 
             if not inst_type:
                 logger.warning(f'ATR: Unknown instrument for {symbol}')
@@ -362,12 +377,25 @@ class DhanBridge:
         try:
             url = f'{self.base_url}/super/orders/{order_id}/{leg}'
             resp = self.session.delete(url, timeout=3)
-            if resp.status_code == 202:
-                logger.info(f'Cancelled {leg} for Super Order {order_id}')
+
+            try:
+                data = resp.json()
+            except Exception:
+                data = {}
+
+            if isinstance(data, list):
+                status = ''
             else:
-                logger.warning(f'Failed cancelling {leg}: {resp.text}')
+                status = data.get('orderStatus', '')
+
+            if resp.status_code == 202 or status in ('CANCELLED', 'CLOSED', 'TRADED'):
+                logger.info(f'{leg} cleaned for Super Order {order_id}')
+            else:
+                logger.debug(
+                    f'Cancel ignored for {leg} | HTTP {resp.status_code} | Status: {status}'
+                )
         except Exception as e:
-            logger.error(f'Cancel Super Leg Error: {e}')
+            logger.error(f'Cancel Super Leg Error [{order_id} | {leg}]: {e}')
 
     def _square_off_position_market(self, security_id: str):
         try:
@@ -600,6 +628,13 @@ class DhanBridge:
             anchor = entry if entry > 0 else curr_ltp
             atr = self.fetch_atr(sid_str, exch_seg, sym, is_pos)
 
+            if atr <= 0:
+                trailing_jump = max(round(anchor * 0.05, 1), 1.0)
+            else:
+                trailing_jump = (
+                    max(round(atr * 0.6, 1), 1.0) if not is_pos else max(round(atr * 1.2, 1), 2.0)
+                )
+
             entry_limit = anchor + min(atr * 1.5, anchor * 0.15) if atr > 0 else anchor * 1.10
 
             if entry and curr_ltp > entry_limit:
@@ -611,24 +646,21 @@ class DhanBridge:
                 return curr_ltp, 'PRICE_LOW'
 
             # SL/Target Calculation
-            final_sl = (
-                parsed_sl
-                if (parsed_sl > 0 and parsed_sl < anchor)
-                else (anchor - max(atr * 2.0, anchor * 0.06, 15) if atr > 0 else anchor * 0.90)
-            )
+            if parsed_sl > 0 and parsed_sl < anchor:
+                final_sl = parsed_sl
+            else:
+                if atr > 0:
+                    final_sl = anchor - (atr * 0.8) if not is_pos else anchor - (atr * 1)
+                else:
+                    final_sl = anchor * (0.93 if not is_pos else 0.90)
 
-            final_target = (
-                parsed_target
-                if parsed_target > anchor
-                else (anchor + min((anchor - final_sl) * 3, anchor * 0.1))
-            )
+            final_target = parsed_target if parsed_target > anchor else (anchor * 5.0)
 
             risk_per_share = max(anchor - final_sl, 1.0)
-            risk_amount = self.get_funds() * 0.02
-            qty = lot
-            # qty = math.floor(math.floor(risk_amount / risk_per_share) / lot) * lot
-            # if qty <= 0:
-            #     qty = lot
+            risk_amount = self.get_funds() * 0.0125
+            qty = math.floor(math.floor(risk_amount / risk_per_share) / lot) * lot
+            if qty <= 0:
+                qty = lot
 
             prod_type = 'MARGIN' if is_pos else 'INTRADAY'
 
@@ -644,7 +676,7 @@ class DhanBridge:
                 'validity': 'DAY',
                 'stopLossPrice': round(final_sl, 2),
                 'targetPrice': round(final_target, 2),
-                'trailingJump': max(round(anchor * 0.05, 1), 1.0),
+                'trailingJump': trailing_jump,
             }
 
             logger.info(f'EXECUTING: {sym} | LTP: {curr_ltp} | Qty: {qty}')

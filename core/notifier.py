@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
 from telethon import TelegramClient
 
@@ -18,7 +19,9 @@ class Notifier:
         except Exception as e:
             logger.error(f'Telegram notify failed: {e}')
 
-    # ---------- High-level helpers ----------
+    async def started_bot(self):
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        await self.send(f'Bot stared at {now}')
 
     async def order_placed(self, symbol: str, qty: int, price: float):
         await self.send(f'✅ ORDER PLACED\n📌 {symbol}\nQty: {qty}\nPrice: {price}')
