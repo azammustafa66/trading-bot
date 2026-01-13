@@ -96,6 +96,16 @@ class DhanBridge:
         else:
             logger.error('Feed loop is not running. Is the thread started?')
 
+    def unsubscribe_sid(self, sid: str):
+        if not self.feed or not self.feed_loop.is_running():
+            return
+
+        payload = [{'ExchangeSegment': 'NSE_FNO', 'SecurityId': sid}]
+
+        asyncio.run_coroutine_threadsafe(self.feed.unsubscribe(payload), self.feed_loop)
+
+        self.depth_cache.pop(sid, None)
+
     # --- DATA FEED ---
     def _on_depth_update(self, data: Dict[str, Any]):
         try:
@@ -117,6 +127,64 @@ class DhanBridge:
                 # logger.debug(f"Tick {sid}: {ltp}")
         except Exception as e:
             logger.error(f'Error parsing depth update: {e}')
+
+    def reconcile_positions(self):
+        """
+        Periodically sync local trades with live Dhan positions.
+        Cleans stale trades + unsubscribes feeds.
+        """
+        try:
+            resp = self.session.get(f'{self.base_url}/positions', timeout=5).json()
+
+            if isinstance(resp, list):
+                live_positions = resp
+            else:
+                live_positions = resp.get('data', [])
+
+            # Build live SID → netQty map
+            live_map = {
+                str(p['securityId']): int(p.get('netQty', 0))
+                for p in live_positions
+                if int(p.get('netQty', 0)) != 0
+            }
+
+            active_sids = self.trade_manager.get_all_sids()
+
+            for sid in active_sids:
+                if sid not in live_map:
+                    logger.warning(f'🧹 Stale trade detected. Cleaning up SID {sid}')
+                    self._cleanup_trade(sid)
+
+        except Exception as e:
+            logger.error(f'Reconcile Positions Failed: {e}', exc_info=True)
+
+    def _cleanup_trade(self, sid: str):
+        """
+        Removes trade + unsubscribes feeds safely.
+        """
+        try:
+            trade = self.trade_manager.get_trade(sid)
+            if not trade:
+                return
+
+            # 1. Remove trade
+            self.trade_manager.remove_trade(sid)
+
+            # 2. Unsubscribe option
+            self.unsubscribe_sid(sid)
+
+            # 3. Unsubscribe futures if present
+            fut_sid = trade.get('fut_sid')
+            if fut_sid:
+                self.unsubscribe_sid(fut_sid)
+
+            # 4. Clear cache
+            self.depth_cache.pop(sid, None)
+
+            logger.info(f'✅ Cleanup complete for {sid}')
+
+        except Exception as e:
+            logger.error(f'Trade Cleanup Failed for {sid}: {e}')
 
     def get_live_ltp(self, security_id: str) -> float:
         ltp = float(self.depth_cache.get(security_id, {}).get('ltp', 0.0))
@@ -152,8 +220,8 @@ class DhanBridge:
         if not bids or not asks:
             return 1.0
 
-        buy_vol = sum(int(x['qty']) for x in bids[:15])
-        sell_vol = sum(int(x['qty']) for x in asks[:15])
+        buy_vol = sum(int(x['qty']) for x in bids[:20])
+        sell_vol = sum(int(x['qty']) for x in asks[:20])
 
         # Anti-spoofing
         if buy_vol > 0 and int(bids[0]['qty']) >= buy_vol * 0.70:
@@ -694,8 +762,11 @@ class DhanBridge:
                 if not order_data and 'orderId' in raw_data:
                     order_data = raw_data
 
+                liquidity_sids = self.get_liquidity_sids(sym, sid_str)
+                fut_sid = liquidity_sids[1] if len(liquidity_sids) > 1 else None
+
                 if order_data.get('orderId'):
-                    self.trade_manager.add_trade(signal, order_data, sid_str)
+                    self.trade_manager.add_trade(signal, order_data, sid_str, fut_sid)
                     return curr_ltp, 'SUCCESS'
 
             logger.error(f'Dhan API Fail: {resp.text}')

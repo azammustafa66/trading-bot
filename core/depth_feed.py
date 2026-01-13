@@ -14,6 +14,7 @@ logger = logging.getLogger('DepthFeed')
 DEPTH_ENDPOINT_20 = 'wss://depth-api-feed.dhan.co/twentydepth'
 
 REQ_SUBSCRIBE = 23
+REQ_UNSUBSCRIBE = 24
 REQ_DISCONNECT = 12
 
 FEED_DEPTH_BID = 41
@@ -92,6 +93,30 @@ class DepthFeed:
                 logger.info(f'Queued {len(instruments)} subscriptions (socket not ready)')
         else:
             logger.info(f'Queued {len(instruments)} subscriptions (waiting for connection)')
+
+    async def unsubscribe(self, instruments: List[Dict[str, str]]) -> None:
+        """
+        Remove instruments from feed + local subscription registry.
+        """
+        for inst in instruments:
+            key = f'{inst["ExchangeSegment"]}:{inst["SecurityId"]}'
+            self._subscriptions.pop(key, None)
+
+        if self._ws is None:
+            logger.info(f'Queued {len(instruments)} unsubscriptions (socket not ready)')
+            return
+
+        payload = {
+            'RequestCode': REQ_UNSUBSCRIBE,
+            'InstrumentCount': len(instruments),
+            'InstrumentList': instruments,
+        }
+
+        try:
+            await self._ws.send(json.dumps(payload))
+            logger.info(f'🧹 Unsubscribed {len(instruments)} symbols')
+        except Exception as e:
+            logger.error(f'Unsubscribe failed: {e}')
 
     async def disconnect(self) -> None:
         """Gracefully stop the feed."""

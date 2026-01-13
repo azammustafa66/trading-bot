@@ -37,7 +37,13 @@ class TradeManager:
             json.dump(self.active_trades, f, indent=2)
         os.replace(tmp, self.file_path)
 
-    def add_trade(self, signal: Dict[str, Any], order_data: Dict[str, Any], sec_id: str):
+    def add_trade(
+        self,
+        signal: Dict[str, Any],
+        order_data: Dict[str, Any],
+        sec_id: str,
+        fut_sid: Optional[str] = None,
+    ):
         """
         Registers a new executed trade.
         """
@@ -59,6 +65,8 @@ class TradeManager:
             ),
             'is_call': is_call,
             'is_put': is_put,
+            'fut_sid': str(fut_sid) if fut_sid else None,
+            'status': 'OPEN',
             'entry_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'signal_details': signal,
         }
@@ -67,6 +75,23 @@ class TradeManager:
             self.active_trades[trade_id] = entry_data
             self._save_trades()
         logger.info(f'Trade Logged: {symbol} (ID: {sec_id})')
+
+    def close_trade(self, sec_id: str, reason: str = ''):
+        sid = str(sec_id)
+
+        with self._lock:
+            trade = self.active_trades.get(sid)
+            if not trade:
+                return
+
+            trade['status'] = 'CLOSED'
+            trade['exit_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            trade['exit_reason'] = reason
+
+            del self.active_trades[sid]
+            self._save_trades()
+
+        logger.info(f'Trade Closed: {sid} | Reason: {reason}')
 
     def remove_trade(self, sec_id: str):
         """Removes a trade from the ledger (after exit)."""
@@ -86,3 +111,39 @@ class TradeManager:
         with self._lock:
             self.active_trades = self._load_trades()
             return self.active_trades.get(str(sec_id))
+
+    def reconcile_with_positions(self, open_positions: List[str]) -> List[Dict[str, Any]]:
+        """
+        Removes ghost trades not present in broker positions.
+        Returns removed trades for cleanup (unsubscribe, etc).
+        """
+        removed = []
+
+        with self._lock:
+            for sid, trade in list(self.active_trades.items()):
+                if sid not in open_positions:
+                    removed.append(trade)
+                    del self.active_trades[sid]
+
+            if removed:
+                self._save_trades()
+
+        return removed
+
+    def get_all_sids(self) -> List[str]:
+        """
+        Returns all subscribed SIDs (option + futures) for active trades
+        """
+        sids = set()
+
+        with self._lock:
+            self.active_trades = self._load_trades()
+
+            for trade in self.active_trades.values():
+                if trade.get('security_id'):
+                    sids.add(str(trade['security_id']))
+
+                if trade.get('fut_sid'):
+                    sids.add(str(trade['fut_sid']))
+
+        return list(sids)

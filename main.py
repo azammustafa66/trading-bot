@@ -199,7 +199,7 @@ class SignalBatcher:
 
         try:
             cnt = 0
-            for _ in range(2400):
+            for _ in range(1800):
                 if self.bridge.kill_switch_triggered:
                     return
 
@@ -277,12 +277,27 @@ class SignalBatcher:
 
                 if bad_tick_count >= bad_ticks_required:
                     await self.notifier.squared_off(sym, f'Liquidity collapse ({imb:.2f})')
-                    logger.critical(f'🧯 Liquidity collapse: {sym}')
+                    logger.critical(f'Liquidity collapse: {sym}')
                     self.bridge.square_off_single(sid)
                     break
 
         finally:
             self.active_monitors.discard(sym)
+
+
+async def reconciliation_loop(bridge: DhanBridge, interval: int = 1800):
+    """
+    Periodically reconciles local trades with broker positions.
+    """
+    logger.info('Reconciliation loop started')
+
+    while True:
+        try:
+            await asyncio.to_thread(bridge.reconcile_positions)
+        except Exception as e:
+            logger.error(f'Reconciliation loop error: {e}', exc_info=True)
+
+        await asyncio.sleep(interval)
 
 
 # --- MAIN ---
@@ -300,6 +315,8 @@ async def main():
     batcher = SignalBatcher(bridge, notifier)
 
     await notifier.started_bot()
+
+    asyncio.create_task(reconciliation_loop(bridge, 1800))
 
     resolved = []
     for ch in TARGET_CHANNELS:
