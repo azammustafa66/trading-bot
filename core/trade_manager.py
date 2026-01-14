@@ -9,6 +9,7 @@ Trades are stored in JSON format and include:
 - Option direction (call/put)
 - Associated futures SID for liquidity monitoring
 """
+
 from __future__ import annotations
 
 import json
@@ -169,9 +170,7 @@ class TradeManager:
 
         return list(sids)
 
-    def reconcile_with_positions(
-        self, open_positions: List[str]
-    ) -> List[Dict[str, Any]]:
+    def reconcile_with_positions(self, open_positions: List[str]) -> List[Dict[str, Any]]:
         """
         Remove trades not present in broker positions.
 

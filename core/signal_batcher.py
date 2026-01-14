@@ -4,6 +4,7 @@ Signal Batcher Module
 Batches incoming Telegram messages and coordinates signal processing,
 order execution, and exit monitoring.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -31,9 +32,7 @@ class ChannelState:
         self._paused_until: Dict[int, datetime] = {}
 
     def pause(self, channel_id: int):
-        self._paused_until[channel_id] = datetime.now().replace(
-            hour=23, minute=59, second=59
-        )
+        self._paused_until[channel_id] = datetime.now().replace(hour=23, minute=59, second=59)
 
     def resume(self, channel_id: int):
         self._paused_until.pop(channel_id, None)
@@ -122,9 +121,7 @@ class SignalBatcher:
 
             try:
                 # 1. First Execution Attempt
-                ltp, status = await asyncio.to_thread(
-                    self.bridge.execute_super_order, sig
-                )
+                ltp, status = await asyncio.to_thread(self.bridge.execute_super_order, sig)
 
                 # 2. Success Case
                 if status == 'SUCCESS':
@@ -165,14 +162,10 @@ class SignalBatcher:
     async def _start_retry_monitor(self, sig: Dict[str, Any]):
         """Create and run a retry monitor for a pending signal."""
         monitor = RetryMonitor(
-            bridge=self.bridge,
-            trade_manager=self.tm,
-            active_monitors=self.active_monitors,
+            bridge=self.bridge, trade_manager=self.tm, active_monitors=self.active_monitors
         )
 
         async def on_success(sym: str, sid: str):
-            asyncio.get_running_loop().create_task(
-                self._start_exit_monitor(sym, sid)
-            )
+            asyncio.get_running_loop().create_task(self._start_exit_monitor(sym, sid))
 
         await monitor.run(sig, on_success)

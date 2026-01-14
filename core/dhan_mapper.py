@@ -8,6 +8,7 @@ Typical usage:
     mapper = DhanMapper()
     sid, exchange, lot_size, _ = mapper.get_security_id("NIFTY 24500 CE", price_ref=125.0)
 """
+
 from __future__ import annotations
 
 import logging
@@ -59,10 +60,9 @@ class DhanMapper:
     COL_TICK_SIZE = 'SEM_TICK_SIZE'
 
     # Month abbreviations for symbol parsing
-    _MONTHS = frozenset({
-        'JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
-        'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'
-    })
+    _MONTHS = frozenset(
+        {'JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'}
+    )
 
     def __init__(self) -> None:
         """Initialize the mapper and load the master CSV."""
@@ -108,16 +108,10 @@ class DhanMapper:
             Returns empty DataFrame on failure.
         """
         try:
-            df = pl.read_csv(
-                self.CSV_FILE,
-                ignore_errors=True,
-                infer_schema_length=10000
-            )
+            df = pl.read_csv(self.CSV_FILE, ignore_errors=True, infer_schema_length=10000)
 
             return df.with_columns(
-                pl.col(self.COL_EXPIRY_DATE).str.to_date(
-                    format='%Y-%m-%d %H:%M:%S', strict=False
-                ),
+                pl.col(self.COL_EXPIRY_DATE).str.to_date(format='%Y-%m-%d %H:%M:%S', strict=False),
                 pl.col(self.COL_STRIKE_PRICE).cast(pl.Float64, strict=False),
                 pl.col(self.COL_SECURITY_ID).cast(pl.Utf8, strict=False),
             )
@@ -138,9 +132,9 @@ class DhanMapper:
             or None if not found or not an option.
         """
         try:
-            row = self.df.filter(
-                pl.col(self.COL_SECURITY_ID) == str(security_id)
-            ).select(self.COL_INSTRUMENT_NAME)
+            row = self.df.filter(pl.col(self.COL_SECURITY_ID) == str(security_id)).select(
+                self.COL_INSTRUMENT_NAME
+            )
 
             if row.is_empty():
                 return None
@@ -219,8 +213,7 @@ class DhanMapper:
     ) -> Optional[Tuple[SecurityId, ExchangeId, LotSize, TickSize]]:
         """Find an exact match for the trading symbol."""
         result = self.df.filter(
-            (pl.col(self.COL_CUSTOM_SYMBOL) == symbol)
-            & (pl.col(self.COL_EXPIRY_DATE) >= today)
+            (pl.col(self.COL_CUSTOM_SYMBOL) == symbol) & (pl.col(self.COL_EXPIRY_DATE) >= today)
         )
 
         if result.is_empty():
@@ -230,16 +223,9 @@ class DhanMapper:
         sid = str(row[self.COL_SECURITY_ID])
         logger.info(f'✅ Exact match: ID {sid}')
 
-        return (
-            sid,
-            str(row[self.COL_EXCHANGE_ID]),
-            int(row[self.COL_LOT_UNITS] or 1),
-            0.0,
-        )
+        return (sid, str(row[self.COL_EXCHANGE_ID]), int(row[self.COL_LOT_UNITS] or 1), 0.0)
 
-    def _parse_trading_symbol(
-        self, symbol: str
-    ) -> Optional[Tuple[str, float, str]]:
+    def _parse_trading_symbol(self, symbol: str) -> Optional[Tuple[str, float, str]]:
         """
         Parse a trading symbol into components.
 
@@ -305,14 +291,11 @@ class DhanMapper:
 
         # Default: nearest expiry
         row = candidates.row(0, named=True)
-        logger.info(f"📍 Selected nearest expiry: {row[self.COL_EXPIRY_DATE]}")
+        logger.info(f'📍 Selected nearest expiry: {row[self.COL_EXPIRY_DATE]}')
         return row
 
     def _match_by_price(
-        self,
-        candidates: pl.DataFrame,
-        price_ref: float,
-        ltp_fetcher: Callable[[str], float],
+        self, candidates: pl.DataFrame, price_ref: float, ltp_fetcher: Callable[[str], float]
     ) -> Optional[dict]:
         """Match candidates by comparing live prices to reference."""
         best_diff = float('inf')
@@ -344,9 +327,7 @@ class DhanMapper:
 
         return best_row
 
-    def get_underlying_future_id(
-        self, symbol: str
-    ) -> Tuple[Optional[SecurityId], TickSize]:
+    def get_underlying_future_id(self, symbol: str) -> Tuple[Optional[SecurityId], TickSize]:
         """
         Find the appropriate futures contract for an underlying.
 
@@ -413,9 +394,7 @@ class DhanMapper:
         logger.info(f'✅ Found target future: {row[self.COL_TRADING_SYMBOL]}')
         return row
 
-    def _find_nearest_future(
-        self, futures: pl.DataFrame, today: date
-    ) -> Optional[dict]:
+    def _find_nearest_future(self, futures: pl.DataFrame, today: date) -> Optional[dict]:
         """Find the nearest non-expired future."""
         result = futures.filter(pl.col(self.COL_EXPIRY_DATE) >= today)
 

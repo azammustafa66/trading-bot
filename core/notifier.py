@@ -4,6 +4,7 @@ Notifier Module.
 Sends trading notifications to admin via Telegram. Used for order
 confirmations, error alerts, and kill switch notifications.
 """
+
 from __future__ import annotations
 
 import logging

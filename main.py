@@ -3,6 +3,7 @@ Trading Bot - Main Entry Point
 
 Listens to Telegram channels for trading signals and executes trades on Dhan.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -25,7 +26,7 @@ except ImportError as e:
 
 load_dotenv()
 
-# --- CONFIG ---
+# --- CONFIG --- #
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
 MAX_LOG_SIZE = int(os.getenv('MAX_LOG_SIZE_MB', '50')) * 1024 * 1024
 LOG_BACKUP_COUNT = int(os.getenv('LOG_BACKUP_COUNT', '5'))
@@ -42,7 +43,7 @@ os.makedirs('logs', exist_ok=True)
 os.makedirs('data', exist_ok=True)
 
 
-# --- LOGGING ---
+# --- LOGGING --- #
 def setup_logging():
     formatter = logging.Formatter(
         '%(asctime)s [%(levelname)s] [%(name)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S'
@@ -67,7 +68,7 @@ setup_logging()
 logger = logging.getLogger('Main')
 
 
-# --- SIGNAL HANDLING ---
+# --- SIGNAL HANDLING --- #
 def handle_shutdown_signal(signum, frame):
     logger.info(f'Received signal {signum}. Shutting down.')
     sys.exit(0)
@@ -77,7 +78,7 @@ signal.signal(signal.SIGTERM, handle_shutdown_signal)
 signal.signal(signal.SIGINT, handle_shutdown_signal)
 
 
-# --- RECONCILIATION ---
+# --- RECONCILIATION --- #
 async def reconciliation_loop(bridge: DhanBridge, interval: int = 1000):
     """Periodically reconciles local trades with broker positions."""
     logger.info('Reconciliation loop started')
@@ -91,7 +92,7 @@ async def reconciliation_loop(bridge: DhanBridge, interval: int = 1000):
         await asyncio.sleep(interval)
 
 
-# --- MAIN ---
+# --- MAIN --- #
 async def main():
     if not TELEGRAM_API_ID or not TELEGRAM_API_HASH:
         logger.critical('Telegram credentials missing')

@@ -10,6 +10,7 @@ Protocol:
 - Binary message format with header + depth levels
 - Subscription management for multiple instruments
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -84,10 +85,7 @@ class DepthFeed:
             token: Dhan access token.
             client_id: Dhan client ID.
         """
-        self.url = (
-            f'{DEPTH_ENDPOINT}?version=2&token={token}'
-            f'&clientId={client_id}&authType=2'
-        )
+        self.url = f'{DEPTH_ENDPOINT}?version=2&token={token}&clientId={client_id}&authType=2'
         self._ws: Optional[WSConnection] = None
         self._stop = False
         self._callbacks: List[DepthCallback] = []
@@ -120,17 +118,13 @@ class DepthFeed:
         while not self._stop:
             try:
                 logger.info('Connecting to Depth Feed...')
-                async with websockets.connect(
-                    self.url, ping_interval=10, max_size=None
-                ) as ws:
+                async with websockets.connect(self.url, ping_interval=10, max_size=None) as ws:
                     self._ws = ws
                     logger.info('Depth Feed connected')
 
                     # Resubscribe on reconnect
                     if self._subscriptions:
-                        await self._send_subscription_packet(
-                            list(self._subscriptions.values())
-                        )
+                        await self._send_subscription_packet(list(self._subscriptions.values()))
 
                     # Process messages
                     async for message in ws:
@@ -167,7 +161,7 @@ class DepthFeed:
         for inst in instruments:
             if 'ExchangeSegment' not in inst or 'SecurityId' not in inst:
                 raise ValueError(f'Invalid instrument: {inst}')
-            key = f"{inst['ExchangeSegment']}:{inst['SecurityId']}"
+            key = f'{inst["ExchangeSegment"]}:{inst["SecurityId"]}'
             self._subscriptions[key] = inst
 
         if self._ws is not None:
@@ -186,7 +180,7 @@ class DepthFeed:
             instruments: List of dicts with 'ExchangeSegment' and 'SecurityId'.
         """
         for inst in instruments:
-            key = f"{inst['ExchangeSegment']}:{inst['SecurityId']}"
+            key = f'{inst["ExchangeSegment"]}:{inst["SecurityId"]}'
             self._subscriptions.pop(key, None)
 
         if self._ws is None:
@@ -224,15 +218,13 @@ class DepthFeed:
     # Internal Methods
     # =========================================================================
 
-    async def _send_subscription_packet(
-        self, instruments: List[Dict[str, str]]
-    ) -> None:
+    async def _send_subscription_packet(self, instruments: List[Dict[str, str]]) -> None:
         """Send subscription request in chunks."""
         if self._ws is None:
             return
 
         for i in range(0, len(instruments), self.SUBSCRIPTION_CHUNK_SIZE):
-            chunk = instruments[i:i + self.SUBSCRIPTION_CHUNK_SIZE]
+            chunk = instruments[i : i + self.SUBSCRIPTION_CHUNK_SIZE]
             payload = {
                 'RequestCode': REQ_SUBSCRIBE,
                 'InstrumentCount': len(chunk),
@@ -264,7 +256,7 @@ class DepthFeed:
                 if end > total_len:
                     break
 
-                payload = data[offset + HEADER_SIZE:end]
+                payload = data[offset + HEADER_SIZE : end]
                 offset = end
 
                 if feed_code not in (FEED_DEPTH_BID, FEED_DEPTH_ASK):
@@ -316,10 +308,6 @@ class DepthFeed:
                 break
 
             price, qty, orders = struct.unpack_from('<dII', payload, i)
-            levels.append({
-                'price': float(price),
-                'qty': int(qty),
-                'orders': int(orders),
-            })
+            levels.append({'price': float(price), 'qty': int(qty), 'orders': int(orders)})
 
         return levels

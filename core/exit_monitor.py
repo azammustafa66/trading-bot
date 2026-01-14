@@ -3,6 +3,7 @@ Exit and Retry Monitor Module
 
 Handles direction-aware exit logic for options trades based on order book imbalance.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -136,12 +137,7 @@ class RetryMonitor:
     Monitors price and retries order execution when breakout trigger is hit.
     """
 
-    def __init__(
-        self,
-        bridge: DhanBridge,
-        trade_manager: TradeManager,
-        active_monitors: Set[str],
-    ):
+    def __init__(self, bridge: DhanBridge, trade_manager: TradeManager, active_monitors: Set[str]):
         self.bridge = bridge
         self.tm = trade_manager
         self.active_monitors = active_monitors
@@ -149,7 +145,7 @@ class RetryMonitor:
     async def run(self, sig: Dict[str, Any], on_success_callback):
         """
         Waits for price to hit trigger, then executes order.
-        
+
         Args:
             sig: Signal dictionary with trading_symbol, trigger_above, etc.
             on_success_callback: Async function(sym, sid) to call on successful execution.
@@ -157,9 +153,7 @@ class RetryMonitor:
         sym = str(sig.get('trading_symbol', ''))
         entry = float(sig.get('trigger_above', 0))
 
-        sid, _, _, _ = self.bridge.mapper.get_security_id(
-            sym, entry, self.bridge.get_live_ltp
-        )
+        sid, _, _, _ = self.bridge.mapper.get_security_id(sym, entry, self.bridge.get_live_ltp)
         if not sid:
             self.active_monitors.discard(sym)
             return
@@ -188,9 +182,7 @@ class RetryMonitor:
 
                 if cnt >= 3:
                     logger.info(f'⚡ Trigger Hit: {sym} ({ltp} >= {entry}). Executing!')
-                    _, status = await asyncio.to_thread(
-                        self.bridge.execute_super_order, sig
-                    )
+                    _, status = await asyncio.to_thread(self.bridge.execute_super_order, sig)
 
                     if status == 'SUCCESS':
                         await on_success_callback(sym, sid_str)
