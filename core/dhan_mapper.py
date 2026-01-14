@@ -1,304 +1,427 @@
+"""
+Dhan Security Mapper Module.
+
+Maps trading symbols (e.g., "NIFTY 24500 CE") to Dhan security IDs by querying
+the daily master CSV. Handles expiry selection, strike matching, and futures lookup.
+
+Typical usage:
+    mapper = DhanMapper()
+    sid, exchange, lot_size, _ = mapper.get_security_id("NIFTY 24500 CE", price_ref=125.0)
+"""
 from __future__ import annotations
 
 import logging
 import os
 import re
-from datetime import datetime
+from datetime import date, datetime
 from typing import Callable, Optional, Tuple
 
 import polars as pl
 import requests
 
-# Ensure this util returns date in IST
 from utils.generate_expiry_dates import get_today, select_expiry_date
 
 logger = logging.getLogger('DhanMapper')
 
+# Type aliases for clarity
+SecurityId = str
+ExchangeId = str
+LotSize = int
+TickSize = float
+
 
 class DhanMapper:
+    """
+    Maps trading symbols to Dhan security IDs using the daily master CSV.
+
+    The mapper downloads the master CSV once per trading day and provides
+    methods to look up options and futures by symbol, strike, and expiry.
+
+    Attributes:
+        CSV_URL: URL to download the Dhan master scrip CSV.
+        CSV_FILE: Local cache path for the CSV file.
+        df: Polars DataFrame containing the loaded CSV data.
+    """
+
     CSV_URL = 'https://images.dhan.co/api-data/api-scrip-master.csv'
     CSV_FILE = 'cache/dhan_master.csv'
 
-    # Column Constants
-    COL_SEM_SM_ID = 'SEM_SMST_SECURITY_ID'
-    COL_SEM_EXM_EXCH_ID = 'SEM_EXM_EXCH_ID'
-    COL_SEM_TRADING_SYMBOL = 'SEM_TRADING_SYMBOL'
-    COL_SEM_CUSTOM_SYMBOL = 'SEM_CUSTOM_SYMBOL'
-    COL_SEM_EXPIRY_DATE = 'SEM_EXPIRY_DATE'
-    COL_SEM_INSTRUMENT_NAME = 'SEM_INSTRUMENT_NAME'
-    COL_SEM_LOT_UNITS = 'SEM_LOT_UNITS'
-    COL_SEM_STRIKE_PRICE = 'SEM_STRIKE_PRICE'
-    COL_SEM_OPTION_TYPE = 'SEM_OPTION_TYPE'
-    COL_SEM_TICK_SIZE = 'SEM_TICK_SIZE'
+    # Column name constants for type safety and refactoring ease
+    COL_SECURITY_ID = 'SEM_SMST_SECURITY_ID'
+    COL_EXCHANGE_ID = 'SEM_EXM_EXCH_ID'
+    COL_TRADING_SYMBOL = 'SEM_TRADING_SYMBOL'
+    COL_CUSTOM_SYMBOL = 'SEM_CUSTOM_SYMBOL'
+    COL_EXPIRY_DATE = 'SEM_EXPIRY_DATE'
+    COL_INSTRUMENT_NAME = 'SEM_INSTRUMENT_NAME'
+    COL_LOT_UNITS = 'SEM_LOT_UNITS'
+    COL_STRIKE_PRICE = 'SEM_STRIKE_PRICE'
+    COL_OPTION_TYPE = 'SEM_OPTION_TYPE'
+    COL_TICK_SIZE = 'SEM_TICK_SIZE'
 
-    def __init__(self):
-        if not os.path.exists('cache'):
-            os.makedirs('cache', exist_ok=True)
+    # Month abbreviations for symbol parsing
+    _MONTHS = frozenset({
+        'JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
+        'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'
+    })
+
+    def __init__(self) -> None:
+        """Initialize the mapper and load the master CSV."""
+        os.makedirs('cache', exist_ok=True)
         self._refresh_master_csv()
         self.df = self._load_csv()
 
-    def _refresh_master_csv(self):
+    def _refresh_master_csv(self) -> None:
         """
-        Refreshes CSV if it wasn't downloaded 'today'.
-        This prevents using yesterday's master file during morning trading.
+        Download the master CSV if stale.
+
+        The CSV is considered fresh if it was modified today (IST).
+        This ensures we always have the latest contract data during
+        morning trading sessions.
         """
         try:
-            should_download = True
             if os.path.exists(self.CSV_FILE):
-                # Get file modification time
                 mtime = os.path.getmtime(self.CSV_FILE)
                 file_date = datetime.fromtimestamp(mtime).date()
-
-                # Compare with current trading date (IST)
-                # If file matches today's date, we don't need to download
                 if file_date == get_today():
-                    should_download = False
+                    logger.info("✅ Master CSV is fresh (today's cache)")
+                    return
 
-            if should_download:
-                logger.info('⬇️ Downloading Master Scrip CSV (New Day Detected)...')
-                resp = requests.get(self.CSV_URL, timeout=30)
-                with open(self.CSV_FILE, 'wb') as f:
-                    f.write(resp.content)
-                logger.info('✅ Download Complete.')
-            else:
-                logger.info("✅ Master CSV is fresh (Today's Cache).")
+            logger.info('⬇️ Downloading Master Scrip CSV...')
+            resp = requests.get(self.CSV_URL, timeout=60)
+            resp.raise_for_status()
 
-        except Exception as e:
-            logger.error(f'CSV Download Error: {e}')
+            with open(self.CSV_FILE, 'wb') as f:
+                f.write(resp.content)
+            logger.info('✅ Download complete')
+
+        except requests.RequestException as e:
+            logger.error(f'CSV download failed: {e}')
+        except OSError as e:
+            logger.error(f'CSV file error: {e}')
 
     def _load_csv(self) -> pl.DataFrame:
+        """
+        Load and preprocess the master CSV.
+
+        Returns:
+            Polars DataFrame with parsed dates and normalized types.
+            Returns empty DataFrame on failure.
+        """
         try:
-            return pl.read_csv(
-                self.CSV_FILE, ignore_errors=True, infer_schema_length=10000
-            ).with_columns(
-                pl.col(self.COL_SEM_EXPIRY_DATE).str.to_date(
+            df = pl.read_csv(
+                self.CSV_FILE,
+                ignore_errors=True,
+                infer_schema_length=10000
+            )
+
+            return df.with_columns(
+                pl.col(self.COL_EXPIRY_DATE).str.to_date(
                     format='%Y-%m-%d %H:%M:%S', strict=False
                 ),
-                pl.col(self.COL_SEM_STRIKE_PRICE).cast(pl.Float64, strict=False),
-                pl.col(self.COL_SEM_SM_ID).cast(pl.Utf8, strict=False),
+                pl.col(self.COL_STRIKE_PRICE).cast(pl.Float64, strict=False),
+                pl.col(self.COL_SECURITY_ID).cast(pl.Utf8, strict=False),
             )
+
         except Exception as e:
-            logger.error(f'CSV Load Error: {e}')
+            logger.error(f'CSV load failed: {e}')
             return pl.DataFrame()
 
-    def get_instrument_type(self, security_id: str) -> str | None:
+    def get_instrument_type(self, security_id: str) -> Optional[str]:
+        """
+        Get the instrument type for a security ID.
+
+        Args:
+            security_id: The Dhan security ID.
+
+        Returns:
+            'OPTIDX' for index options, 'OPTSTK' for stock options,
+            or None if not found or not an option.
+        """
         try:
-            row = self.df.filter(pl.col(self.COL_SEM_SM_ID) == str(security_id)).select(
-                self.COL_SEM_INSTRUMENT_NAME
-            )
+            row = self.df.filter(
+                pl.col(self.COL_SECURITY_ID) == str(security_id)
+            ).select(self.COL_INSTRUMENT_NAME)
 
             if row.is_empty():
                 return None
 
             inst = row.item()
-            if inst in ('OPTIDX', 'OPTSTK'):
-                return inst
+            return inst if inst in ('OPTIDX', 'OPTSTK') else None
 
         except Exception as e:
-            logger.warning(f'{e}')
-
-        return None
+            logger.warning(f'Instrument type lookup failed: {e}')
+            return None
 
     def get_security_id(
         self,
         trading_symbol: str,
         price_ref: float = 0.0,
         ltp_fetcher: Optional[Callable[[str], float]] = None,
-    ) -> Tuple[Optional[str], Optional[str], int, float]:
+    ) -> Tuple[Optional[SecurityId], Optional[ExchangeId], LotSize, TickSize]:
         """
-        Maps symbol to ID with detailed logging of the decision process.
+        Map a trading symbol to its Dhan security ID.
+
+        Performs a multi-step lookup:
+        1. Exact match on custom symbol
+        2. Regex parsing for underlying/strike/type
+        3. Price-based disambiguation for multiple expiries
+
+        Args:
+            trading_symbol: Symbol like "NIFTY 24500 CE" or "BANKNIFTY 52000 PE".
+            price_ref: Reference price for smart expiry selection (optional).
+            ltp_fetcher: Callback to fetch live prices for disambiguation.
+
+        Returns:
+            Tuple of (security_id, exchange_id, lot_size, tick_size).
+            Returns (None, None, 0, 0.0) if not found.
+
+        Example:
+            >>> sid, exch, lot, tick = mapper.get_security_id("NIFTY 24500 CE", 125.0)
+            >>> print(f"Security ID: {sid}, Lot Size: {lot}")
         """
         if self.df.is_empty():
             return None, None, 0, 0.0
 
-        # FIX: Use get_today() for consistency with IST
         today = get_today()
-        logger.info(f"🔍 Mapping: '{trading_symbol}' | Ref Price: {price_ref}")
+        symbol_upper = trading_symbol.upper().strip()
+        logger.info(f"🔍 Mapping: '{symbol_upper}' | Ref Price: {price_ref}")
 
-        # 1. EXACT MATCH
-        res = self.df.filter(
-            (pl.col(self.COL_SEM_CUSTOM_SYMBOL) == trading_symbol)
-            & (pl.col(self.COL_SEM_EXPIRY_DATE) >= today)
+        # Step 1: Try exact match first (fastest path)
+        exact_match = self._find_exact_match(symbol_upper, today)
+        if exact_match:
+            return exact_match
+
+        # Step 2: Parse symbol components and search
+        parsed = self._parse_trading_symbol(symbol_upper)
+        if not parsed:
+            return None, None, 0, 0.0
+
+        underlying, strike, opt_type = parsed
+
+        # Step 3: Find candidates matching parsed criteria
+        candidates = self._find_candidates(underlying, strike, opt_type, today)
+        if candidates.is_empty():
+            logger.warning(f'No candidates found for {underlying} {strike} {opt_type}')
+            return None, None, 0, 0.0
+
+        # Step 4: Select best candidate (by price or nearest expiry)
+        best_row = self._select_best_candidate(candidates, price_ref, ltp_fetcher)
+
+        return (
+            str(best_row[self.COL_SECURITY_ID]),
+            str(best_row[self.COL_EXCHANGE_ID]),
+            int(best_row[self.COL_LOT_UNITS] or 1),
+            0.0,
         )
 
-        if not res.is_empty():
-            row = res.row(0, named=True)
-            sid = str(row[self.COL_SEM_SM_ID])
+    def _find_exact_match(
+        self, symbol: str, today: date
+    ) -> Optional[Tuple[SecurityId, ExchangeId, LotSize, TickSize]]:
+        """Find an exact match for the trading symbol."""
+        result = self.df.filter(
+            (pl.col(self.COL_CUSTOM_SYMBOL) == symbol)
+            & (pl.col(self.COL_EXPIRY_DATE) >= today)
+        )
+
+        if result.is_empty():
+            return None
+
+        row = result.row(0, named=True)
+        sid = str(row[self.COL_SECURITY_ID])
+        logger.info(f'✅ Exact match: ID {sid}')
+
+        return (
+            sid,
+            str(row[self.COL_EXCHANGE_ID]),
+            int(row[self.COL_LOT_UNITS] or 1),
+            0.0,
+        )
+
+    def _parse_trading_symbol(
+        self, symbol: str
+    ) -> Optional[Tuple[str, float, str]]:
+        """
+        Parse a trading symbol into components.
+
+        Args:
+            symbol: Uppercase trading symbol.
+
+        Returns:
+            Tuple of (underlying, strike, option_type) or None if parsing fails.
+        """
+        parts = symbol.split()
+        strike: Optional[float] = None
+        opt_type: Optional[str] = None
+        underlying: Optional[str] = None
+
+        for part in parts:
+            if re.match(r'^\d+(\.\d+)?$', part):
+                strike = float(part)
+            elif part in ('CE', 'CALL'):
+                opt_type = 'CE'
+            elif part in ('PE', 'PUT'):
+                opt_type = 'PE'
+            elif part not in self._MONTHS and not re.match(r'^\d+$', part):
+                if not underlying:
+                    underlying = part
+
+        if not all([strike, opt_type, underlying]):
+            logger.warning(f'❌ Failed to parse: {symbol}')
+            return None
+
+        logger.info(f'🧩 Parsed: {underlying} | Strike: {strike} | Type: {opt_type}')
+        return underlying, strike, opt_type  # type: ignore
+
+    def _find_candidates(
+        self, underlying: str, strike: float, opt_type: str, today: date
+    ) -> pl.DataFrame:
+        """Find all option contracts matching the criteria."""
+        return self.df.filter(
+            pl.col(self.COL_CUSTOM_SYMBOL).str.contains(rf'\b{underlying}\b', literal=False)
+            & (pl.col(self.COL_OPTION_TYPE) == opt_type)
+            & (pl.col(self.COL_STRIKE_PRICE).round(2) == round(strike, 2))
+            & (pl.col(self.COL_EXPIRY_DATE) >= today)
+        ).sort(self.COL_EXPIRY_DATE)
+
+    def _select_best_candidate(
+        self,
+        candidates: pl.DataFrame,
+        price_ref: float,
+        ltp_fetcher: Optional[Callable[[str], float]],
+    ) -> dict:
+        """
+        Select the best candidate from multiple matches.
+
+        Uses price matching if reference price and LTP fetcher are available,
+        otherwise falls back to nearest expiry.
+        """
+        logger.info(f'Found {candidates.height} candidates')
+
+        # Try price-based selection if we have tools for it
+        if candidates.height > 1 and price_ref > 0 and ltp_fetcher:
+            best_row = self._match_by_price(candidates, price_ref, ltp_fetcher)
+            if best_row:
+                return best_row
+
+        # Default: nearest expiry
+        row = candidates.row(0, named=True)
+        logger.info(f"📍 Selected nearest expiry: {row[self.COL_EXPIRY_DATE]}")
+        return row
+
+    def _match_by_price(
+        self,
+        candidates: pl.DataFrame,
+        price_ref: float,
+        ltp_fetcher: Callable[[str], float],
+    ) -> Optional[dict]:
+        """Match candidates by comparing live prices to reference."""
+        best_diff = float('inf')
+        best_row = None
+        max_deviation = price_ref * 0.20  # 20% tolerance
+
+        for i in range(min(3, candidates.height)):
+            row = candidates.row(i, named=True)
+            sid = str(row[self.COL_SECURITY_ID])
+
+            try:
+                live_price = ltp_fetcher(sid)
+            except Exception:
+                live_price = 0.0
+
             logger.info(
-                f'✅ Exact Match Found: ID {sid} | Symbol: {row[self.COL_SEM_TRADING_SYMBOL]}'
-            )
-            return (
-                sid,
-                str(row[self.COL_SEM_EXM_EXCH_ID]),
-                int(row[self.COL_SEM_LOT_UNITS] or 1),
-                0.0,
+                f'   ⚖️ Candidate {i + 1}: Expiry {row[self.COL_EXPIRY_DATE]} | '
+                f'Live: {live_price} vs Ref: {price_ref}'
             )
 
-        MONTHS = {
-            'JAN',
-            'FEB',
-            'MAR',
-            'APR',
-            'MAY',
-            'JUN',
-            'JUL',
-            'AUG',
-            'SEP',
-            'OCT',
-            'NOV',
-            'DEC',
-        }
+            if live_price > 0:
+                diff = abs(live_price - price_ref)
+                if diff < best_diff and diff < max_deviation:
+                    best_diff = diff
+                    best_row = row
 
-        # 2. SMART REGEX SEARCH
-        try:
-            parts = trading_symbol.upper().split()
-            strike = None
-            opt_type = None
-            underlying = None
+        if best_row:
+            logger.info(f'✅ Price match: ID {best_row[self.COL_SECURITY_ID]}')
 
-            for p in parts:
-                if re.match(r'^\d+(\.\d+)?$', p):
-                    strike = float(p)
-                elif p in ['CE', 'CALL']:
-                    opt_type = 'CE'
-                elif p in ['PE', 'PUT']:
-                    opt_type = 'PE'
-                elif p not in MONTHS and not re.match(r'^\d+$', p):
-                    if not underlying:
-                        underlying = p
+        return best_row
 
-            logger.info(f'🧩 Regex Parsed: {underlying} | Strike: {strike} | Type: {opt_type}')
+    def get_underlying_future_id(
+        self, symbol: str
+    ) -> Tuple[Optional[SecurityId], TickSize]:
+        """
+        Find the appropriate futures contract for an underlying.
 
-            if not strike or not opt_type or not underlying:
-                logger.warning(f'❌ Regex failed to extract full details from {trading_symbol}')
-                return None, None, 0, 0.0
+        Uses smart expiry selection to handle monthly rollovers correctly.
 
-            smart_res = self.df.filter(
-                (
-                    pl.col(self.COL_SEM_CUSTOM_SYMBOL).str.contains(
-                        rf'\b{underlying}\b', literal=False
-                    )
-                )
-                & (pl.col(self.COL_SEM_OPTION_TYPE) == opt_type)
-                & (pl.col(self.COL_SEM_STRIKE_PRICE).round(2) == round(strike, 2))
-                & (pl.col(self.COL_SEM_EXPIRY_DATE) >= today)
-            ).sort(self.COL_SEM_EXPIRY_DATE)
+        Args:
+            symbol: Underlying symbol (e.g., "NIFTY", "BANKNIFTY", "RELIANCE").
 
-            if smart_res.is_empty():
-                logger.warning(f'No candidates found in CSV for {underlying} {strike} {opt_type}')
-                return None, None, 0, 0.0
-
-            logger.info(f'Found {smart_res.height} candidates. Analyzing...')
-
-            # 3. SMART PRICE MATCHING
-            final_row = None
-            if smart_res.height > 1 and price_ref > 0 and ltp_fetcher:
-                best_diff = float('inf')
-                candidates = smart_res.head(3)
-
-                for i in range(candidates.height):
-                    row = candidates.row(i, named=True)
-                    sid = str(row[self.COL_SEM_SM_ID])
-                    expiry = row[self.COL_SEM_EXPIRY_DATE]
-
-                    try:
-                        live_price = ltp_fetcher(sid)
-                    except Exception:
-                        live_price = 0.0
-
-                    logger.info(
-                        f'   ⚖️ Candidate {i + 1}: Expiry {expiry} | ID {sid} \
-                        | Live: {live_price} vs Ref: {price_ref}'
-                    )
-
-                    if live_price > 0:
-                        diff = abs(live_price - price_ref)
-                        if diff < best_diff and diff < (price_ref * 0.20):
-                            best_diff = diff
-                            final_row = row
-
-                if not final_row:
-                    logger.warning(
-                        'Price match failed (No price within 20%). Reverting to nearest.'
-                    )
-                else:
-                    logger.info(
-                        f'Smart Match Selected: ID {final_row[self.COL_SEM_SM_ID]} (Best Price Fit)'
-                    )
-
-            if not final_row:
-                final_row = smart_res.row(0, named=True)
-                logger.info(
-                    f'📍 Default Selection (Nearest Expiry): {final_row[self.COL_SEM_EXPIRY_DATE]}'
-                )
-
-            return (
-                str(final_row[self.COL_SEM_SM_ID]),
-                str(final_row[self.COL_SEM_EXM_EXCH_ID]),
-                int(final_row[self.COL_SEM_LOT_UNITS] or 1),
-                0.0,
-            )
-
-        except Exception as e:
-            logger.error(f'Smart Search Error: {e}', exc_info=True)
-
-        return None, None, 0, 0.0
-
-    def get_underlying_future_id(self, symbol: str) -> Tuple[Optional[str], float]:
+        Returns:
+            Tuple of (security_id, tick_size) or (None, 0.0) if not found.
+        """
         if self.df.is_empty():
             return None, 0.0
 
         underlying = symbol.split()[0].upper()
-        # Clean up Indices names if needed
-        if underlying == 'BANKNIFTY':
-            underlying = 'BANKNIFTY'
-
-        logger.info(f'🔮 Finding Future for {underlying}...')
+        logger.info(f'🔮 Finding future for: {underlying}')
 
         try:
             target_expiry = select_expiry_date(underlying)
-            target_month = target_expiry.month
-            target_year = target_expiry.year
-            logger.info(f'   📅 Target Rollover Date: {target_expiry}')
+            logger.info(f'   📅 Target expiry: {target_expiry}')
 
-            res = self.df.filter(
-                (pl.col(self.COL_SEM_TRADING_SYMBOL).str.starts_with(underlying))
-                & (pl.col(self.COL_SEM_INSTRUMENT_NAME).is_in(['FUTIDX', 'FUTSTK']))
-            ).sort(self.COL_SEM_EXPIRY_DATE)
+            # Filter to matching futures
+            futures = self.df.filter(
+                pl.col(self.COL_TRADING_SYMBOL).str.starts_with(underlying)
+                & pl.col(self.COL_INSTRUMENT_NAME).is_in(['FUTIDX', 'FUTSTK'])
+            ).sort(self.COL_EXPIRY_DATE)
 
-            if res.is_empty():
+            if futures.is_empty():
                 return None, 0.0
 
-            candidate = None
-            target_future = res.filter(
-                (pl.col(self.COL_SEM_EXPIRY_DATE).dt.month() == target_month)
-                & (pl.col(self.COL_SEM_EXPIRY_DATE).dt.year() == target_year)
+            # Try to find exact month match
+            candidate = self._find_target_month_future(
+                futures, target_expiry.month, target_expiry.year
             )
 
-            if not target_future.is_empty():
-                candidate = target_future.row(0, named=True)
-                logger.info(
-                    f'Found Target Future: {candidate[self.COL_SEM_TRADING_SYMBOL]} \
-                    (ID: {candidate[self.COL_SEM_SM_ID]})'
-                )
-            else:
-                # FIX: Use get_today() here as well
-                today = get_today()
-                fallback_res = res.filter(pl.col(self.COL_SEM_EXPIRY_DATE) >= today)
-                if not fallback_res.is_empty():
-                    candidate = fallback_res.row(0, named=True)
-                    logger.warning(
-                        f'   Target Future not found. Using Nearest: \
-                            {candidate[self.COL_SEM_TRADING_SYMBOL]}'
-                    )
+            # Fallback to nearest available future
+            if not candidate:
+                candidate = self._find_nearest_future(futures, get_today())
 
             if candidate:
                 return (
-                    str(candidate[self.COL_SEM_SM_ID]),
-                    float(candidate[self.COL_SEM_TICK_SIZE] or 0.05),
+                    str(candidate[self.COL_SECURITY_ID]),
+                    float(candidate[self.COL_TICK_SIZE] or 0.05),
                 )
 
         except Exception as e:
-            logger.error(f'Future Map Error: {e}')
+            logger.error(f'Future lookup failed: {e}')
 
         return None, 0.0
+
+    def _find_target_month_future(
+        self, futures: pl.DataFrame, month: int, year: int
+    ) -> Optional[dict]:
+        """Find future expiring in the target month."""
+        result = futures.filter(
+            (pl.col(self.COL_EXPIRY_DATE).dt.month() == month)
+            & (pl.col(self.COL_EXPIRY_DATE).dt.year() == year)
+        )
+
+        if result.is_empty():
+            return None
+
+        row = result.row(0, named=True)
+        logger.info(f'✅ Found target future: {row[self.COL_TRADING_SYMBOL]}')
+        return row
+
+    def _find_nearest_future(
+        self, futures: pl.DataFrame, today: date
+    ) -> Optional[dict]:
+        """Find the nearest non-expired future."""
+        result = futures.filter(pl.col(self.COL_EXPIRY_DATE) >= today)
+
+        if result.is_empty():
+            return None
+
+        row = result.row(0, named=True)
+        logger.warning(f'⚠️ Using nearest future: {row[self.COL_TRADING_SYMBOL]}')
+        return row

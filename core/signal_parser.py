@@ -1,3 +1,14 @@
+"""
+Signal Parser Module.
+
+Parses trading signals from Telegram messages into structured data that can
+be used for order execution. Handles multi-part messages, noise removal,
+deduplication, and expiry date resolution.
+
+Typical message formats:
+    "BANKNIFTY 43500 PE BUY ABOVE 320 SL 280 TARGET 400"
+    "Buy Nifty 26100 PE above 70\\nSL 55\\nTarget 100 120"
+"""
 from __future__ import annotations
 
 import json
@@ -10,105 +21,106 @@ from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 
-# -------------------------------------------------------------------
-# Setup
-# -------------------------------------------------------------------
 load_dotenv()
 logger = logging.getLogger('SignalParser')
 
+# Timezone setup
 try:
     from zoneinfo import ZoneInfo
-
     IST = ZoneInfo('Asia/Kolkata')
 except Exception:
     IST = None
 
+# Configuration
 MARKET_OPEN_TIME = time(9, 15)
 DEDUPE_WINDOW_MINUTES = 15
-
 SIGNALS_JSONL = os.getenv('SIGNALS_JSONL', 'data/signals.jsonl')
 SIGNALS_JSON = os.getenv('SIGNALS_JSON', 'data/signals.json')
 
-# -------------------------------------------------------------------
-# Constants
-# -------------------------------------------------------------------
-IGNORE_KEYWORDS = {
-    'RISK TRAIL',
-    'SAFE BOOK',
-    'IGNORE',
-    'BOOK PROFIT',
-    'EXIT',
-    'AVOID',
-    'FUT',
-    'FUTURE',
-    'FUTURES',
-    'CLOSE',
-}
+# Keywords to ignore - these indicate non-actionable messages
+IGNORE_KEYWORDS = frozenset({
+    'RISK TRAIL', 'SAFE BOOK', 'IGNORE', 'BOOK PROFIT', 'EXIT',
+    'AVOID', 'FUT', 'FUTURE', 'FUTURES', 'CLOSE',
+})
 
-NOISE_WORDS = {
-    'RISKY',
-    'SAFE',
-    'HERO',
-    'ZERO',
-    'JACKPOT',
-    'MOMENTUM',
-    'TRADE',
-    'EXPIRY',
-    'SPECIAL',
-    'TODAY',
-    'MORNING',
-    'ROCKET',
-    'BTST',
-}
+# Noise words to strip from symbol detection
+NOISE_WORDS = frozenset({
+    'RISKY', 'SAFE', 'HERO', 'ZERO', 'JACKPOT', 'MOMENTUM',
+    'TRADE', 'EXPIRY', 'SPECIAL', 'TODAY', 'MORNING', 'ROCKET', 'BTST',
+})
 
-# -------------------------------------------------------------------
-# Regex
-# -------------------------------------------------------------------
+# Compiled regex patterns
 RE_POSITIONAL = re.compile(r'\bPOSITION(AL)?|HOLD|LONG\s*TERM\b', re.I)
-
 RE_STOCK_NAME = re.compile(
     r'\b(?:BUY|SELL)\s+([A-Z0-9\s&\-]+?)\s+\d{4,6}\s*(CE|PE|CALL|PUT)\b', re.I
 )
-
 RE_DATE = re.compile(
     r'\b(\d{1,2})(?:st|nd|rd|th)?\s*(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\b', re.I
 )
-
 RE_STRIKE = re.compile(r'\b(\d{4,6})\s*(CE|PE|CALL|PUT)\b', re.I)
-
 RE_TRIGGER = re.compile(r'\b(?:ABOVE|AT|CMP|RANGE)\s+([\d.\-\s]+)', re.I)
 RE_SL = re.compile(r'\b(?:SL|STOP\s*LOSS)\s*[:\-]?\s*([\d.\-\s]+)', re.I)
 RE_TARGET = re.compile(r'\bTARGETS?\s+([\d.\-\s]+)', re.I)
-
 RE_DIGITS_ONLY = re.compile(r'^[\d.\-\s]+$')
 
 
-# -------------------------------------------------------------------
-# Time Helpers
-# -------------------------------------------------------------------
+# =============================================================================
+# Time Utilities
+# =============================================================================
+
 def now_ist() -> datetime:
+    """Get current datetime in IST."""
     return datetime.now(IST) if IST else datetime.now()
 
 
 def to_ist(dt: Any) -> Optional[datetime]:
+    """
+    Convert a datetime to IST timezone.
+
+    Args:
+        dt: Datetime object or string to convert.
+
+    Returns:
+        Datetime in IST, or None if conversion fails.
+    """
+    if isinstance(dt, str):
+        try:
+            dt = datetime.fromisoformat(dt)
+        except ValueError:
+            return None
+
     if isinstance(dt, datetime):
         if IST and dt.tzinfo is None:
             return dt.replace(tzinfo=IST)
         return dt.astimezone(IST) if IST else dt
+
     return None
 
 
-# -------------------------------------------------------------------
-# Text Helpers
-# -------------------------------------------------------------------
+# =============================================================================
+# Text Processing
+# =============================================================================
+
 def remove_noise(text: str) -> str:
+    """Remove noise words from text for cleaner parsing."""
     clean = text.upper()
-    for w in NOISE_WORDS:
-        clean = clean.replace(w, '')
+    for word in NOISE_WORDS:
+        clean = clean.replace(word, '')
     return clean.strip()
 
 
 def parse_price(text: str) -> Optional[float]:
+    """
+    Extract price value(s) from text.
+
+    If multiple values found (e.g., "100-110"), returns the mean.
+
+    Args:
+        text: Text containing price information.
+
+    Returns:
+        Extracted price or None if not found.
+    """
     nums = re.findall(r'(\d+(?:\.\d+)?)', text)
     if not nums:
         return None
@@ -116,21 +128,41 @@ def parse_price(text: str) -> Optional[float]:
     return statistics.mean(values) if len(values) > 1 else values[0]
 
 
-# -------------------------------------------------------------------
-# Detection
-# -------------------------------------------------------------------
-def detect_underlying(text: str) -> Optional[str]:
-    up = remove_noise(text)
+def is_price_only(text: str) -> bool:
+    """Check if text contains only price/numeric data."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return bool(lines) and all(RE_DIGITS_ONLY.fullmatch(line) for line in lines)
 
-    if 'BANKNIFTY' in up or 'BANK NIFTY' in up:
+
+# =============================================================================
+# Symbol Detection
+# =============================================================================
+
+def detect_underlying(text: str) -> Optional[str]:
+    """
+    Detect the underlying instrument from signal text.
+
+    Handles index names (NIFTY, BANKNIFTY, SENSEX) and stock names.
+
+    Args:
+        text: Signal text to parse.
+
+    Returns:
+        Underlying symbol (e.g., "BANKNIFTY", "RELIANCE") or None.
+    """
+    clean = remove_noise(text)
+
+    # Check for known indices first
+    if 'BANKNIFTY' in clean or 'BANK NIFTY' in clean:
         return 'BANKNIFTY'
-    if 'FINNIFTY' in up:
+    if 'FINNIFTY' in clean:
         return 'FINNIFTY'
-    if 'SENSEX' in up or 'SNSEX' in up:
+    if 'SENSEX' in clean or 'SNSEX' in clean:
         return 'SENSEX'
-    if re.search(r'\bNIFTY\b', up):
+    if re.search(r'\bNIFTY\b', clean):
         return 'NIFTY'
 
+    # Try to extract stock name
     match = RE_STOCK_NAME.search(text)
     if match:
         return match.group(1).replace(' ', '').upper()
@@ -139,25 +171,49 @@ def detect_underlying(text: str) -> Optional[str]:
 
 
 def extract_explicit_date(text: str) -> Optional[str]:
-    m = RE_DATE.search(text)
-    if m:
-        return f'{int(m.group(1)):02d} {m.group(2).upper()}'
+    """
+    Extract explicit expiry date from text (e.g., "25 DEC").
+
+    Args:
+        text: Signal text to parse.
+
+    Returns:
+        Date label like "25 DEC" or None.
+    """
+    match = RE_DATE.search(text)
+    if match:
+        return f'{int(match.group(1)):02d} {match.group(2).upper()}'
     return None
 
 
-def is_price_only(text: str) -> bool:
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    return bool(lines) and all(RE_DIGITS_ONLY.fullmatch(line) for line in lines)
-
-
-# -------------------------------------------------------------------
+# =============================================================================
 # Core Parsing
-# -------------------------------------------------------------------
+# =============================================================================
+
 def parse_single_block(text: str, ref_date: Optional[date] = None) -> Dict[str, Any]:
+    """
+    Parse a single signal message block into structured data.
+
+    Args:
+        text: Raw signal text.
+        ref_date: Reference date for expiry calculation.
+
+    Returns:
+        Dictionary with parsed signal data including:
+        - action: 'BUY' or 'SELL'
+        - underlying: Instrument symbol
+        - strike: Strike price
+        - option_type: 'CALL' or 'PUT'
+        - trigger_above: Entry trigger price
+        - stop_loss: Stop loss price
+        - target: Target price
+        - trading_symbol: Full symbol for trading
+        - ignore: Whether to skip this signal
+    """
     raw = text.strip()
     clean = raw.upper()
 
-    out = {
+    result: Dict[str, Any] = {
         'raw': raw,
         'action': None,
         'underlying': None,
@@ -172,66 +228,120 @@ def parse_single_block(text: str, ref_date: Optional[date] = None) -> Dict[str, 
         'ignore': False,
     }
 
-    if not clean or is_price_only(clean) or any(k in clean for k in IGNORE_KEYWORDS):
-        out['ignore'] = True
-        return out
+    # Quick rejection checks
+    if not clean or is_price_only(clean):
+        result['ignore'] = True
+        return result
 
-    out['action'] = 'BUY' if 'BUY' in clean else 'SELL' if 'SELL' in clean else None
-    out['underlying'] = detect_underlying(clean)
+    if any(keyword in clean for keyword in IGNORE_KEYWORDS):
+        result['ignore'] = True
+        return result
+
+    # Extract core signal components
+    result['action'] = 'BUY' if 'BUY' in clean else ('SELL' if 'SELL' in clean else None)
+    result['underlying'] = detect_underlying(clean)
 
     strike_match = RE_STRIKE.search(clean)
     if strike_match:
-        out['strike'] = int(strike_match.group(1))
-        out['option_type'] = 'CALL' if strike_match.group(2).startswith('C') else 'PUT'
+        result['strike'] = int(strike_match.group(1))
+        result['option_type'] = 'CALL' if strike_match.group(2).startswith('C') else 'PUT'
 
-    if m := RE_TRIGGER.search(clean):
-        out['trigger_above'] = parse_price(m.group(1))
+    # Extract prices
+    if match := RE_TRIGGER.search(clean):
+        result['trigger_above'] = parse_price(match.group(1))
 
-    if m := RE_SL.search(clean):
-        out['stop_loss'] = parse_price(m.group(1))
+    if match := RE_SL.search(clean):
+        result['stop_loss'] = parse_price(match.group(1))
 
-    if m := RE_TARGET.search(clean):
-        values = re.findall(r'\d+(?:\.\d+)?', m.group(1))
-        out['target'] = max(map(float, values)) if values else None
+    if match := RE_TARGET.search(clean):
+        values = re.findall(r'\d+(?:\.\d+)?', match.group(1))
+        result['target'] = max(map(float, values)) if values else None
 
-    if not (out['action'] and out['underlying'] and out['strike'] and out['option_type']):
-        out['ignore'] = True
-        return out
+    # Validate required fields
+    required = [result['action'], result['underlying'], result['strike'], result['option_type']]
+    if not all(required):
+        result['ignore'] = True
+        return result
 
+    # Generate trading symbol with expiry
     try:
-        manual = extract_explicit_date(clean)
-        if manual:
-            label = manual
-        else:
+        expiry_label = extract_explicit_date(clean)
+        if not expiry_label:
             from utils.generate_expiry_dates import select_expiry_label
-
             ref = ref_date or date.today()
-            label = select_expiry_label(out['underlying'], datetime.combine(ref, time(9, 15)))
+            expiry_label = select_expiry_label(
+                result['underlying'],
+                datetime.combine(ref, time(9, 15))
+            )
 
-        out['expiry_label'] = label
-        out['trading_symbol'] = f'{out["underlying"]} {label} {out["strike"]} {out["option_type"]}'
+        result['expiry_label'] = expiry_label
+        result['trading_symbol'] = (
+            f"{result['underlying']} {expiry_label} "
+            f"{result['strike']} {result['option_type']}"
+        )
+
     except Exception as e:
         logger.warning(f'Symbol generation failed: {e}')
-        out['ignore'] = True
+        result['ignore'] = True
 
-    return out
+    return result
 
 
-# -------------------------------------------------------------------
+# =============================================================================
 # Stream Processing
-# -------------------------------------------------------------------
+# =============================================================================
+
 def process_and_save(
     messages: List[str],
     dates: List[datetime],
     jsonl_path: str = SIGNALS_JSONL,
     json_path: str = SIGNALS_JSON,
 ) -> List[Dict[str, Any]]:
+    """
+    Process a batch of Telegram messages into trading signals.
+
+    Handles:
+    - Multi-part message batching
+    - Deduplication within time window
+    - Persistence to JSONL and JSON files
+
+    Args:
+        messages: List of message texts.
+        dates: Corresponding message timestamps.
+        jsonl_path: Path for append-only signal log.
+        json_path: Path for current signals JSON.
+
+    Returns:
+        List of new (non-duplicate) parsed signals.
+    """
     if len(messages) != len(dates):
         return []
 
-    parsed, buffer, buffer_dates = [], '', []
+    # Parse messages with batching for multi-part signals
+    parsed = _parse_message_batch(messages, dates)
 
-    def flush():
+    # Load existing signals for deduplication
+    existing = _load_existing_signals(jsonl_path)
+
+    # Filter duplicates
+    new_signals = _filter_duplicates(parsed, existing)
+
+    # Persist new signals
+    if new_signals:
+        _save_signals(new_signals, existing, jsonl_path, json_path)
+
+    return new_signals
+
+
+def _parse_message_batch(
+    messages: List[str], dates: List[datetime]
+) -> List[Dict[str, Any]]:
+    """Parse messages, batching multi-part signals together."""
+    parsed: List[Dict[str, Any]] = []
+    buffer = ''
+    buffer_dates: List[datetime] = []
+
+    def flush_buffer():
         nonlocal buffer, buffer_dates
         if not buffer:
             return
@@ -243,65 +353,104 @@ def process_and_save(
             sig['timestamp'] = ref_dt.isoformat()
             parsed.append(sig)
 
-        buffer, buffer_dates = '', []
+        buffer = ''
+        buffer_dates = []
 
     for msg, dt in zip(messages, dates):
         text = msg.strip()
         if not text:
             continue
 
-        strong_start = bool(re.search(r'\b(BUY|SELL)\b', text.upper()) and detect_underlying(text))
-        cur_ts = to_ist(dt)
-        last_ts = to_ist(buffer_dates[-1]) if buffer_dates else None
-
-        stale = (
-            cur_ts is not None and last_ts is not None and (cur_ts - last_ts).total_seconds() > 300
+        # Check if this starts a new signal
+        is_new_signal = bool(
+            re.search(r'\b(BUY|SELL)\b', text.upper()) and detect_underlying(text)
         )
 
-        if buffer and (strong_start or stale or is_price_only(text)):
-            flush()
+        curr_ts = to_ist(dt)
+        last_ts = to_ist(buffer_dates[-1]) if buffer_dates else None
+        is_stale = (
+            curr_ts and last_ts and
+            (curr_ts - last_ts).total_seconds() > 300
+        )
+
+        # Flush buffer if new signal, stale, or price-only followup
+        if buffer and (is_new_signal or is_stale or is_price_only(text)):
+            flush_buffer()
 
         buffer = f'{buffer}\n{text}' if buffer else text
         buffer_dates.append(dt)
 
-    flush()
+    flush_buffer()
+    return parsed
 
-    existing = {}
-    if os.path.exists(SIGNALS_JSONL):
-        with open(SIGNALS_JSONL) as f:
+
+def _load_existing_signals(jsonl_path: str) -> Dict[tuple, Dict[str, Any]]:
+    """Load existing signals keyed by (symbol, action)."""
+    existing: Dict[tuple, Dict[str, Any]] = {}
+
+    if os.path.exists(jsonl_path):
+        with open(jsonl_path) as f:
             for line in f:
-                s = json.loads(line)
-                key = (s['trading_symbol'], s['action'])
-                existing[key] = s
+                try:
+                    sig = json.loads(line)
+                    key = (sig['trading_symbol'], sig['action'])
+                    existing[key] = sig
+                except (json.JSONDecodeError, KeyError):
+                    continue
 
-    new = []
-    for s in parsed:
-        key = (s['trading_symbol'], s['action'])
-        ts = to_ist(s['timestamp'])
+    return existing
+
+
+def _filter_duplicates(
+    parsed: List[Dict[str, Any]],
+    existing: Dict[tuple, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Filter out duplicate signals within dedupe window."""
+    new_signals = []
+
+    for sig in parsed:
+        key = (sig['trading_symbol'], sig['action'])
         old = existing.get(key)
 
         if not old:
-            new.append(s)
-            existing[key] = s
+            new_signals.append(sig)
+            existing[key] = sig
             continue
 
-        ts = to_ist(s['timestamp'])
+        # Check if enough time has passed
+        curr_ts = to_ist(sig['timestamp'])
         old_ts = to_ist(old['timestamp'])
-        if (ts and old_ts) and (ts - old_ts).total_seconds() > DEDUPE_WINDOW_MINUTES * 60:
-            new.append(s)
-            existing[key] = s
 
-    if new:
-        with open(SIGNALS_JSONL, 'a') as f:
-            for s in new:
-                f.write(json.dumps(s) + '\n')
-        with open(SIGNALS_JSON, 'w') as f:
-            json.dump(list(existing.values()), f, indent=2)
+        if curr_ts and old_ts:
+            elapsed = (curr_ts - old_ts).total_seconds()
+            if elapsed > DEDUPE_WINDOW_MINUTES * 60:
+                new_signals.append(sig)
+                existing[key] = sig
 
-    return new
+    return new_signals
 
 
-# --- 6. Test Suite ---
+def _save_signals(
+    new_signals: List[Dict[str, Any]],
+    all_signals: Dict[tuple, Dict[str, Any]],
+    jsonl_path: str,
+    json_path: str,
+) -> None:
+    """Persist signals to disk."""
+    # Append to JSONL
+    with open(jsonl_path, 'a') as f:
+        for sig in new_signals:
+            f.write(json.dumps(sig) + '\n')
+
+    # Overwrite JSON with all signals
+    with open(json_path, 'w') as f:
+        json.dump(list(all_signals.values()), f, indent=2)
+
+
+# =============================================================================
+# Test Suite
+# =============================================================================
+
 if __name__ == '__main__':
     print(f'\nRunning Test Suite [Time: {now_ist()}]')
 
@@ -313,9 +462,9 @@ if __name__ == '__main__':
         'BANKNIFTY 43500 PE BUY ABOVE 320 SL 280 TARGET 400',
         'SENSEX 87500 CE BUY ABOVE 420 SL 380 TARGET 500',
         'Hero Zero Risky',
-        'Buy Risky Nifty 26100 pe above 70',  # TEST 1: Noise Removal
+        'Buy Risky Nifty 26100 pe above 70',
         'SL 115',
-        'Target 160.... 250',  # TEST 2: Price Range Average
+        'Target 160.... 250',
         'Positional',
         'Buy Sensex 25 Dec 85000 CE Above 1000',
         'SL 800',
@@ -327,17 +476,18 @@ if __name__ == '__main__':
     ]
 
     test_dates = [mock_now for _ in test_stream]
-
     results = process_and_save(
-        test_stream, test_dates, jsonl_path='test_signals.jsonl', json_path='test_signals.json'
+        test_stream, test_dates,
+        jsonl_path='test_signals.jsonl',
+        json_path='test_signals.json'
     )
 
     print(f'\nProcessed {len(results)} signals.\n')
-    print(f'{"SYMBOL":<35} | {"ACTION":<5} | {"TRIG":<5} | {"SL":<5} | {"TARGET"}')
+    print(f'{"SYMBOL":<35} | {"ACTION":<5} | {"TRIG":<5} | {"SL":<5} | TARGET')
     print('-' * 80)
 
     for r in results:
-        trig = str(r['trigger_above']) if r['trigger_above'] is not None else '---'
-        sl = str(r['stop_loss']) if r['stop_loss'] is not None else '---'
-        target = str(r['target'])
+        trig = str(r['trigger_above']) if r['trigger_above'] else '---'
+        sl = str(r['stop_loss']) if r['stop_loss'] else '---'
+        target = str(r['target']) if r['target'] else '---'
         print(f'{r["trading_symbol"]:<35} | {r["action"]:<5} | {trig:<5} | {sl:<5} | {target}')

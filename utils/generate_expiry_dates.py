@@ -71,7 +71,7 @@ def select_expiry_date(underlying: str, reference_dt: Optional[datetime] = None)
         elif KOLKATA:
             now = now.astimezone(KOLKATA)
 
-    today = date.today()
+    today = datetime.now(KOLKATA).date()
     u = underlying.strip().upper()
 
     calculated_date = today  # Default
