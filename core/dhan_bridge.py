@@ -93,6 +93,7 @@ class DhanBridge:
 
         # Depth feed
         self.depth_cache: Dict[str, Dict[str, Any]] = {}
+        self.depth_updated = asyncio.Event()
         self.feed: Optional[DepthFeed] = None
         self.feed_loop = asyncio.new_event_loop()
         self.feed_thread = threading.Thread(target=self._run_feed_loop, daemon=True)
@@ -205,12 +206,18 @@ class DhanBridge:
             if bids and asks:
                 self.depth_cache[sid]['ltp'] = (bids[0]['price'] + asks[0]['price']) / 2
 
+            # Signal that depth has been updated (for event-driven monitors)
+            self.depth_updated.set()
+
         except Exception as e:
             logger.error(f'Depth update error: {e}', exc_info=True)
 
     def get_live_ltp(self, security_id: str) -> float:
         """
-        Get the last traded price from depth cache.
+        Get the last traded price.
+
+        Uses depth cache for NSE instruments. Falls back to broker API
+        for BSE instruments (SENSEX) which don't have depth data.
 
         Args:
             security_id: The security to get price for.
@@ -218,7 +225,49 @@ class DhanBridge:
         Returns:
             Current LTP or 0.0 if not available.
         """
-        return float(self.depth_cache.get(security_id, {}).get('ltp', 0.0))
+        # Try depth cache first
+        ltp = float(self.depth_cache.get(security_id, {}).get('ltp', 0.0))
+        if ltp > 0:
+            return ltp
+
+        # Fallback to broker API for BSE instruments
+        return self._fetch_ltp_from_api(security_id)
+
+    def _fetch_ltp_from_api(self, security_id: str) -> float:
+        """
+        Fetch LTP from Dhan marketfeed API.
+
+        Used as fallback for BSE instruments that don't have depth data.
+        """
+        try:
+            # Determine exchange segment from mapper
+            exch_seg = self.mapper.get_exchange_segment(security_id)
+            if not exch_seg:
+                exch_seg = 'BSE_FNO'  # Default for SENSEX options
+
+            payload = {exch_seg: [int(security_id)]}
+
+            resp = self.session.post(f'{self.base_url}/marketfeed/ltp', json=payload, timeout=5)
+
+            if resp.status_code == 200:
+                data = resp.json()
+                # Response format: {"data": {"BSE_FNO": {"123456": {"last_price": 150.5}}}}
+                seg_data = data.get('data', {}).get(exch_seg, {})
+                price_data = seg_data.get(str(security_id), {})
+                ltp = float(price_data.get('last_price', 0))
+
+                # Cache it for future use
+                if ltp > 0:
+                    if security_id not in self.depth_cache:
+                        self.depth_cache[security_id] = {}
+                    self.depth_cache[security_id]['ltp'] = ltp
+
+                return ltp
+
+        except Exception as e:
+            logger.debug(f'API LTP fetch failed for {security_id}: {e}')
+
+        return 0.0
 
     # =========================================================================
     # Order Book Imbalance

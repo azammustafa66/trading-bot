@@ -67,6 +67,40 @@ class ExitMonitor:
         is_put = trade.get('is_put', False)
         direction = 'PUT' if is_put else 'CALL'
 
+        # --- WICK DETECTION: Check if entry price is below trigger ---
+        entry_price = float(trade.get('entry_price', 0))
+        signal_details = trade.get('signal_details', {})
+        trigger_price = float(signal_details.get('trigger_above', 0))
+
+        if trigger_price > 0 and entry_price > 0 and entry_price < trigger_price:
+            logger.warning(
+                f'⚠️ WICK DETECTED: {sym} entry={entry_price:.2f} < trigger={trigger_price:.2f}'
+            )
+            await self.notifier.squared_off(
+                sym, f'Wick entry (avg {entry_price:.2f} < {trigger_price:.2f})'
+            )
+            self.bridge.square_off_single(sid)
+            self.active_monitors.discard(sym)
+            return
+
+        # --- WICK DETECTION: First 10 seconds - ensure price sustains above trigger ---
+        if trigger_price > 0:
+            logger.info(f'{sym}: Monitoring wick protection for 10s (trigger={trigger_price:.2f})')
+            for _ in range(5):  # 5 checks × 2s = 10s
+                await asyncio.sleep(2)
+                ltp = self.bridge.get_live_ltp(sid)
+                if ltp > 0 and ltp < trigger_price * 0.995:  # Allow 0.5% tolerance
+                    logger.warning(
+                        f'⚠️ WICK EXIT: {sym} price={ltp:.2f} fell below trigger={trigger_price:.2f}'
+                    )
+                    await self.notifier.squared_off(
+                        sym, f'Wick (price {ltp:.2f} < {trigger_price:.2f})'
+                    )
+                    self.bridge.square_off_single(sid)
+                    self.active_monitors.discard(sym)
+                    return
+            logger.info(f'{sym}: Wick protection passed, continuing normal monitoring')
+
         liquidity_sids = self.bridge.get_liquidity_sids(sym, sid)
         new_subs = []
         for liq_sid in liquidity_sids:
@@ -82,9 +116,20 @@ class ExitMonitor:
             f'Thresholds: bad<{bad_imb}, good>={good_imb}'
         )
 
+        log_counter = 0
+        LOG_EVERY_N_UPDATES = 30
+
         try:
             while True:
-                await asyncio.sleep(1.5)
+                # Wait for depth update (event-driven) with timeout
+                try:
+                    await asyncio.wait_for(
+                        self.bridge.depth_updated.wait(),
+                        timeout=2.0,  # Fallback if no updates
+                    )
+                    self.bridge.depth_updated.clear()
+                except asyncio.TimeoutError:
+                    pass  # Continue to check even if no update
 
                 trade = self.tm.get_trade(sid)
                 if not trade:
@@ -100,10 +145,14 @@ class ExitMonitor:
                 else:
                     effective_imb = raw_imb
 
-                logger.info(
-                    f'📊 IMB {sym} ({direction}): raw={raw_imb:.2f} eff={effective_imb:.2f} | '
-                    f'bad_ticks={bad_tick_count}/{bad_ticks_required}'
-                )
+                # Log only every N updates
+                log_counter += 1
+                if log_counter >= LOG_EVERY_N_UPDATES:
+                    log_counter = 0
+                    logger.info(
+                        f'📊 IMB {sym} ({direction}): raw={raw_imb:.2f} eff={effective_imb:.2f} | '
+                        f'bad_ticks={bad_tick_count}/{bad_ticks_required}'
+                    )
 
                 # Use effective_imb for threshold checks
                 if effective_imb >= good_imb:
@@ -169,7 +218,7 @@ class RetryMonitor:
                 if self.bridge.kill_switch_triggered:
                     return
 
-                await asyncio.sleep(10.0)
+                await asyncio.sleep(5.0)
 
                 ltp = self.bridge.get_live_ltp(sid_str)
                 if ltp == 0:

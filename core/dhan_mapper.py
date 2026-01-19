@@ -146,6 +146,38 @@ class DhanMapper:
             logger.warning(f'Instrument type lookup failed: {e}')
             return None
 
+    def get_exchange_segment(self, security_id: str) -> Optional[str]:
+        """
+        Get the exchange segment for a security ID.
+
+        Args:
+            security_id: The Dhan security ID.
+
+        Returns:
+            Exchange segment string (e.g., 'NSE_FNO', 'BSE_FNO') or None.
+        """
+        try:
+            row = self.df.filter(pl.col(self.COL_SECURITY_ID) == str(security_id)).select(
+                'SEM_EXM_EXCH_ID'  # Exchange ID column
+            )
+
+            if row.is_empty():
+                return None
+
+            exch_id = str(row.item()).strip().upper()
+
+            # Map exchange ID to segment
+            if exch_id in ('NSE', 'NFO'):
+                return 'NSE_FNO'
+            elif exch_id in ('BSE', 'BFO'):
+                return 'BSE_FNO'
+            else:
+                return None
+
+        except Exception as e:
+            logger.debug(f'Exchange segment lookup failed: {e}')
+            return None
+
     def get_security_id(
         self,
         trading_symbol: str,

@@ -39,6 +39,11 @@ ADMIN_ID = int(os.getenv('ADMIN_ID', ''))
 RAW_CHANNELS = os.getenv('TARGET_CHANNELS', os.getenv('TARGET_CHANNEL', ''))
 TARGET_CHANNELS = [x.strip() for x in RAW_CHANNELS.split(',') if x.strip()]
 
+# Add numeric ID support
+TARGET_CHANNEL_ID = os.getenv('TARGET_CHANNEL_ID', '')
+if TARGET_CHANNEL_ID:
+    TARGET_CHANNELS.append(int(TARGET_CHANNEL_ID))
+
 os.makedirs('logs', exist_ok=True)
 os.makedirs('data', exist_ok=True)
 
@@ -108,11 +113,15 @@ async def main():
 
     await notifier.started_bot()
 
-    asyncio.create_task(reconciliation_loop(bridge, 1000))
+    asyncio.create_task(reconciliation_loop(bridge, 300))  # Every 5 minutes
 
     resolved = []
     for ch in TARGET_CHANNELS:
         try:
+            # If channel is a string but looks like an ID, convert it
+            if isinstance(ch, str) and ch.lstrip('-').isdigit():
+                ch = int(ch)
+
             resolved.append(await client.get_entity(ch))
         except Exception as e:
             logger.error(f'Failed to resolve channel {ch}: {e}')
@@ -120,6 +129,10 @@ async def main():
     @client.on(events.NewMessage(chats=resolved))
     async def handler(event):
         if event.message and event.message.message:
+            chat = await event.get_chat()
+            chat_name = getattr(chat, 'title', getattr(chat, 'username', 'Unknown'))
+            text = event.message.message.replace('\n', ' ')[:50]
+            logger.info(f'📩 Received from [{chat_name}]: {text}...')
             await batcher.add_message(event.message.message, event.message.date, event.chat_id)
 
     await client.run_until_disconnected()  # pyright: ignore[reportGeneralTypeIssues]

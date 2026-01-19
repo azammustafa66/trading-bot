@@ -77,12 +77,12 @@ NOISE_WORDS = frozenset(
 # Compiled regex patterns
 RE_POSITIONAL = re.compile(r'\bPOSITION(AL)?|HOLD|LONG\s*TERM\b', re.I)
 RE_STOCK_NAME = re.compile(
-    r'\b(?:BUY|SELL)\s+([A-Z0-9\s&\-]+?)\s+\d{4,6}\s*(CE|PE|CALL|PUT)\b', re.I
+    r'\b(?:BUY|SELL)\s+([A-Z0-9\s&\-]+?)\s+\d+(?:\.\d+)?\s*(CE|PE|CALL|PUT)\b', re.I
 )
 RE_DATE = re.compile(
     r'\b(\d{1,2})(?:st|nd|rd|th)?\s*(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\b', re.I
 )
-RE_STRIKE = re.compile(r'\b(\d{4,6})\s*(CE|PE|CALL|PUT)\b', re.I)
+RE_STRIKE = re.compile(r'\b(\d+(?:\.\d+)?)\s*(CE|PE|CALL|PUT)\b', re.I)
 RE_TRIGGER = re.compile(r'\b(?:ABOVE|AT|CMP|RANGE)\s+([\d.\-\s]+)', re.I)
 RE_SL = re.compile(r'\b(?:SL|STOP\s*LOSS)\s*[:\-]?\s*([\d.\-\s]+)', re.I)
 RE_TARGET = re.compile(r'\bTARGETS?\s+([\d.\-\s]+)', re.I)
