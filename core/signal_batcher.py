@@ -80,6 +80,47 @@ class SignalBatcher:
             self.active_monitors.add(sym)
             loop.create_task(self._start_exit_monitor(sym, sid))
 
+    def start_manual_monitor(self, pos: Dict[str, Any]):
+        """Start monitoring a manually opened position."""
+        sid = str(pos['securityId'])
+        sym = pos['tradingSymbol']
+        qty = int(pos.get('netQty', 0))
+
+        # Determine direction for imbalance check
+        # Net Positive = LONG (Buyer), Net Negative = SHORT (Seller)
+        # For Options:
+        #   Buy Call (Qty > 0) -> Call, Buyer
+        #   Buy Put (Qty > 0) -> Put, Buyer
+        #   Sell Call (Qty < 0) -> Call, Seller
+        #   Sell Put (Qty < 0) -> Put, Seller
+
+        # We need to know if it's PUT or CALL to set 'is_put'
+        # Default to False if unknown, but usually symbol has 'PE' or 'CE'
+        is_put = 'PE' in sym.upper() or 'PUT' in sym.upper()
+
+        # Prepare mock objects for TradeManager.add_trade(signal, order_data, sec_id)
+        mock_signal = {
+            'action': 'MANUAL',
+            'trading_symbol': sym,
+            'is_manual': True,  # Flag for Alert-Only mode
+            'timestamp': datetime.now().isoformat(),
+        }
+
+        mock_order = {
+            'orderId': 'MANUAL',
+            'quantity': qty,
+            'averagePrice': float(pos.get('avgCostPrice', 0)),
+            'status': 'TRADED',
+        }
+
+        # Add to Trade Manager
+        self.tm.add_trade(mock_signal, mock_order, sid)
+
+        logger.info(f'🛡️ Starting Manual Monitor for {sym} (Manual)')
+        self.active_monitors.add(sym)
+        loop = asyncio.get_running_loop()
+        loop.create_task(self._start_exit_monitor(sym, sid))
+
     async def add_message(self, text: str, dt: datetime, channel_id: int):
         """Add a message to the batch for processing."""
         if self.channel_state.is_paused(channel_id):

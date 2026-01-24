@@ -158,7 +158,7 @@ class DhanMapper:
         """
         try:
             row = self.df.filter(pl.col(self.COL_SECURITY_ID) == str(security_id)).select(
-                'SEM_EXM_EXCH_ID'  # Exchange ID column
+                self.COL_EXCHANGE_ID
             )
 
             if row.is_empty():
@@ -171,8 +171,16 @@ class DhanMapper:
                 return 'NSE_FNO'
             elif exch_id in ('BSE', 'BFO'):
                 return 'BSE_FNO'
+            elif exch_id == 'NSE_EQ':
+                return 'NSE_EQ'
+            elif exch_id == 'BSE_EQ':
+                return 'BSE_EQ'
             else:
                 return None
+
+        except Exception as e:
+            logger.debug(f'Exchange segment lookup failed: {e}')
+            return None
 
         except Exception as e:
             logger.debug(f'Exchange segment lookup failed: {e}')
@@ -222,10 +230,10 @@ class DhanMapper:
         if not parsed:
             return None, None, 0, 0.0
 
-        underlying, strike, opt_type = parsed
+        underlying, strike, opt_type, target_month = parsed
 
         # Step 3: Find candidates matching parsed criteria
-        candidates = self._find_candidates(underlying, strike, opt_type, today)
+        candidates = self._find_candidates(underlying, strike, opt_type, today, target_month)
         if candidates.is_empty():
             logger.warning(f'No candidates found for {underlying} {strike} {opt_type}')
             return None, None, 0, 0.0
@@ -257,7 +265,7 @@ class DhanMapper:
 
         return (sid, str(row[self.COL_EXCHANGE_ID]), int(row[self.COL_LOT_UNITS] or 1), 0.0)
 
-    def _parse_trading_symbol(self, symbol: str) -> Optional[Tuple[str, float, str]]:
+    def _parse_trading_symbol(self, symbol: str) -> Optional[Tuple[str, float, str, Optional[str]]]:
         """
         Parse a trading symbol into components.
 
@@ -265,12 +273,13 @@ class DhanMapper:
             symbol: Uppercase trading symbol.
 
         Returns:
-            Tuple of (underlying, strike, option_type) or None if parsing fails.
+            Tuple of (underlying, strike, option_type, target_month).
         """
         parts = symbol.split()
         strike: Optional[float] = None
         opt_type: Optional[str] = None
         underlying: Optional[str] = None
+        target_month: Optional[str] = None
 
         for part in parts:
             if re.match(r'^\d+(\.\d+)?$', part):
@@ -279,7 +288,9 @@ class DhanMapper:
                 opt_type = 'CE'
             elif part in ('PE', 'PUT'):
                 opt_type = 'PE'
-            elif part not in self._MONTHS and not re.match(r'^\d+$', part):
+            elif part in self._MONTHS:
+                target_month = part
+            elif not re.match(r'^\d+$', part):
                 if not underlying:
                     underlying = part
 
@@ -287,19 +298,49 @@ class DhanMapper:
             logger.warning(f'❌ Failed to parse: {symbol}')
             return None
 
-        logger.info(f'🧩 Parsed: {underlying} | Strike: {strike} | Type: {opt_type}')
-        return underlying, strike, opt_type  # type: ignore
+        logger.info(
+            f'🧩 Parsed: {underlying} | Strike: {strike} | Type: {opt_type} | Month: {target_month}'
+        )
+        return underlying, strike, opt_type, target_month  # type: ignore
 
     def _find_candidates(
-        self, underlying: str, strike: float, opt_type: str, today: date
+        self,
+        underlying: str,
+        strike: float,
+        opt_type: str,
+        today: date,
+        target_month: Optional[str] = None,
     ) -> pl.DataFrame:
         """Find all option contracts matching the criteria."""
-        return self.df.filter(
+        candidates = self.df.filter(
             pl.col(self.COL_CUSTOM_SYMBOL).str.contains(rf'\b{underlying}\b', literal=False)
             & (pl.col(self.COL_OPTION_TYPE) == opt_type)
             & (pl.col(self.COL_STRIKE_PRICE).round(2) == round(strike, 2))
             & (pl.col(self.COL_EXPIRY_DATE) >= today)
-        ).sort(self.COL_EXPIRY_DATE)
+        )
+
+        if target_month:
+            # Map month name (FEB) to month number, fallback to ignore if unknown
+            # Standard month map
+            m_map = {
+                'JAN': 1,
+                'FEB': 2,
+                'MAR': 3,
+                'APR': 4,
+                'MAY': 5,
+                'JUN': 6,
+                'JUL': 7,
+                'AUG': 8,
+                'SEP': 9,
+                'OCT': 10,
+                'NOV': 11,
+                'DEC': 12,
+            }
+            month_num = m_map.get(target_month)
+            if month_num:
+                candidates = candidates.filter(pl.col(self.COL_EXPIRY_DATE).dt.month() == month_num)
+
+        return candidates.sort(self.COL_EXPIRY_DATE)
 
     def _select_best_candidate(
         self,

@@ -233,42 +233,6 @@ class DhanBridge:
         # Fallback to broker API for BSE instruments
         return self._fetch_ltp_from_api(security_id)
 
-    def _fetch_ltp_from_api(self, security_id: str) -> float:
-        """
-        Fetch LTP from Dhan marketfeed API.
-
-        Used as fallback for BSE instruments that don't have depth data.
-        """
-        try:
-            # Determine exchange segment from mapper
-            exch_seg = self.mapper.get_exchange_segment(security_id)
-            if not exch_seg:
-                exch_seg = 'BSE_FNO'  # Default for SENSEX options
-
-            payload = {exch_seg: [int(security_id)]}
-
-            resp = self.session.post(f'{self.base_url}/marketfeed/ltp', json=payload, timeout=5)
-
-            if resp.status_code == 200:
-                data = resp.json()
-                # Response format: {"data": {"BSE_FNO": {"123456": {"last_price": 150.5}}}}
-                seg_data = data.get('data', {}).get(exch_seg, {})
-                price_data = seg_data.get(str(security_id), {})
-                ltp = float(price_data.get('last_price', 0))
-
-                # Cache it for future use
-                if ltp > 0:
-                    if security_id not in self.depth_cache:
-                        self.depth_cache[security_id] = {}
-                    self.depth_cache[security_id]['ltp'] = ltp
-
-                return ltp
-
-        except Exception as e:
-            logger.debug(f'API LTP fetch failed for {security_id}: {e}')
-
-        return 0.0
-
     # =========================================================================
     # Order Book Imbalance
     # =========================================================================
@@ -295,8 +259,19 @@ class DhanBridge:
         bids = data.get('bid')
         asks = data.get('ask')
         if not bids or not asks:
+            # Warn periodically if depth is consistently empty
+            now = time.monotonic()
+            last = self._imbalance_log_ts.get(security_id, 0)
+            if now - last >= 10:
+                logger.warning(
+                    f'⚠️ Empty Depth for {security_id}. \
+                    Bids: {len(bids or [])}, \
+                    Asks: {len(asks or [])}'
+                )
+                self._imbalance_log_ts[security_id] = now
             return 1.0
 
+        # FIX: Relaxed time check from 0.25s to 2.0s
         # Check for stale data (bid/ask timestamps too far apart)
         time_diff = abs(data['bid_ts'] - data['ask_ts'])
         if time_diff > 2.0:
@@ -346,7 +321,7 @@ class DhanBridge:
         """Log imbalance calculation (rate-limited to every 5s)."""
         now = time.monotonic()
         last = self._imbalance_log_ts.get(security_id, 0)
-        if now - last >= 5:
+        if now - last >= 60:
             logger.info(
                 f'⚖️ IMB {security_id} = {imb} | '
                 f'Buy={buy_vol} Sell={sell_vol} | Lag={time_diff:.4f}s'
@@ -407,7 +382,7 @@ class DhanBridge:
         opt_imb = self.get_order_imbalance(sids[0])
         fut_imb = self.get_order_imbalance(sids[1])
 
-        logger.info(f'Fut IMB: {fut_imb}, Opt IMB: {opt_imb}')
+        # logger.info(f'Fut IMB: {fut_imb}, Opt IMB: {opt_imb}')
 
         # Futures healthy → ignore option selling pressure
         if fut_imb >= 1.0:
@@ -424,28 +399,35 @@ class DhanBridge:
     # Position Management
     # =========================================================================
 
-    def reconcile_positions(self) -> None:
+    def reconcile_positions(self) -> List[Dict[str, Any]]:
         """
         Sync local trade records with broker positions.
-
-        Removes stale trades that no longer exist at the broker and
-        unsubscribes their data feeds.
+        Returns: List of new manual positions found.
         """
+        new_positions = []
         try:
             resp = self.session.get(f'{self.base_url}/positions', timeout=5).json()
             positions = resp if isinstance(resp, list) else resp.get('data', [])
 
             # Build map of live positions with non-zero quantity
-            live_sids = {str(p['securityId']) for p in positions if int(p.get('netQty', 0)) != 0}
+            live_map = {str(p['securityId']): p for p in positions if int(p.get('netQty', 0)) != 0}
+            live_sids = set(live_map.keys())
 
-            # Clean up stale trades
+            # 1. Clean up stale trades
             for sid in self.trade_manager.get_all_sids():
                 if sid not in live_sids:
                     logger.warning(f'🧹 Cleaning stale trade: {sid}')
                     self._cleanup_trade(sid)
 
+            # 2. Identify new manual trades
+            for sid, pos in live_map.items():
+                if not self.trade_manager.get_trade(sid):
+                    new_positions.append(pos)
+
         except Exception as e:
             logger.error(f'Reconciliation failed: {e}', exc_info=True)
+
+        return new_positions
 
     def _cleanup_trade(self, sid: str) -> None:
         """
@@ -935,9 +917,12 @@ class DhanBridge:
 
         return curr_ltp
 
-    def _fetch_ltp_from_api(self, sid: str, exch_seg: str) -> float:
+    def _fetch_ltp_from_api(self, sid: str, exch_seg: str = None) -> float:
         """Fetch LTP via Dhan ticker API."""
         try:
+            if not exch_seg:
+                exch_seg = self.mapper.get_exchange_segment(sid) or 'NSE_FNO'
+
             url = f'{self.base_url}/marketfeed/ltp'
             payload = {exch_seg: [int(sid)]}
             resp = self.session.post(url, json=payload, timeout=2).json()
@@ -948,7 +933,13 @@ class DhanBridge:
                 if ltp > 0:
                     # Cache the value
                     if sid not in self.depth_cache:
-                        self.depth_cache[sid] = {}
+                        self.depth_cache[sid] = {
+                            'bid': [],
+                            'ask': [],
+                            'ltp': 0.0,
+                            'bid_ts': 0,
+                            'ask_ts': 0,
+                        }
                     self.depth_cache[sid]['ltp'] = ltp
                     logger.info(f'API price: {ltp}')
                 return ltp
@@ -983,7 +974,7 @@ class DhanBridge:
         if atr <= 0:
             trailing_jump = max(round(anchor * 0.05, 1), 1.0)
         else:
-            multiplier = 1.2 if is_positional else 0.6
+            multiplier = 1.0 if is_positional else 0.5
             min_jump = 2.0 if is_positional else 1.0
             trailing_jump = max(round(atr * multiplier, 1), min_jump)
 
@@ -998,7 +989,7 @@ class DhanBridge:
             final_sl = anchor * fallback_pct
 
         # Target
-        final_target = parsed_target if parsed_target > anchor else anchor * 5.0
+        final_target = anchor * 10.0
 
         return final_sl, final_target, trailing_jump
 
@@ -1009,11 +1000,6 @@ class DhanBridge:
         qty = math.floor(math.floor(risk_amount / risk_per_share) / lot) * lot
 
         if qty <= 0:
-            qty = lot
-
-        # Stock options: single lot only
-        inst_type = self.mapper.get_instrument_type(sid)
-        if inst_type == 'OPTSTK':
             qty = lot
 
         return qty

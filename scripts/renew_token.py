@@ -6,15 +6,15 @@ Logs in to Dhan using Client ID, PIN, and TOTP Secret.
 Updates the DHAN_ACCESS_TOKEN in the .env file.
 """
 
+import logging
 import os
-import sys
 import re
+import sys
+from logging.handlers import RotatingFileHandler
+
 import pyotp
 from dhanhq import DhanLogin
 from dotenv import load_dotenv
-
-import logging
-from logging.handlers import RotatingFileHandler
 
 # Path to the .env file and log file
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

@@ -84,13 +84,19 @@ signal.signal(signal.SIGINT, handle_shutdown_signal)
 
 
 # --- RECONCILIATION --- #
-async def reconciliation_loop(bridge: DhanBridge, interval: int = 1000):
+async def reconciliation_loop(bridge: DhanBridge, batcher: SignalBatcher, interval: int = 1000):
     """Periodically reconciles local trades with broker positions."""
     logger.info('Reconciliation loop started')
 
     while True:
         try:
-            await asyncio.to_thread(bridge.reconcile_positions)
+            # Reconcile and get new manual positions
+            new_positions = await asyncio.to_thread(bridge.reconcile_positions)
+
+            # Start monitoring new manual positions
+            for pos in new_positions:
+                batcher.start_manual_monitor(pos)
+
         except Exception as e:
             logger.error(f'Reconciliation loop error: {e}', exc_info=True)
 
@@ -113,7 +119,7 @@ async def main():
 
     await notifier.started_bot()
 
-    asyncio.create_task(reconciliation_loop(bridge, 300))  # Every 5 minutes
+    asyncio.create_task(reconciliation_loop(bridge, batcher, 300))  # Every 5 minutes
 
     resolved = []
     for ch in TARGET_CHANNELS:
@@ -129,10 +135,6 @@ async def main():
     @client.on(events.NewMessage(chats=resolved))
     async def handler(event):
         if event.message and event.message.message:
-            chat = await event.get_chat()
-            chat_name = getattr(chat, 'title', getattr(chat, 'username', 'Unknown'))
-            text = event.message.message.replace('\n', ' ')[:50]
-            logger.info(f'📩 Received from [{chat_name}]: {text}...')
             await batcher.add_message(event.message.message, event.message.date, event.chat_id)
 
     await client.run_until_disconnected()  # pyright: ignore[reportGeneralTypeIssues]

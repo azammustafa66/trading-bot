@@ -68,9 +68,9 @@ class ExitMonitor:
         direction = 'PUT' if is_put else 'CALL'
 
         # --- WICK DETECTION: Check if entry price is below trigger ---
-        entry_price = float(trade.get('entry_price', 0))
+        entry_price = float(trade.get('entry_price') or 0)
         signal_details = trade.get('signal_details', {})
-        trigger_price = float(signal_details.get('trigger_above', 0))
+        trigger_price = float(signal_details.get('trigger_above') or 0)
 
         if trigger_price > 0 and entry_price > 0 and entry_price < trigger_price:
             logger.warning(
@@ -103,9 +103,12 @@ class ExitMonitor:
 
         liquidity_sids = self.bridge.get_liquidity_sids(sym, sid)
         new_subs = []
+        new_subs = []
         for liq_sid in liquidity_sids:
             if liq_sid not in self._subscribed_sids:
-                new_subs.append({'ExchangeSegment': 'NSE_FNO', 'SecurityId': liq_sid})
+                # Dynamic segment resolution
+                seg = self.bridge.mapper.get_exchange_segment(liq_sid) or 'NSE_FNO'
+                new_subs.append({'ExchangeSegment': seg, 'SecurityId': liq_sid})
                 self._subscribed_sids.add(liq_sid)
 
         if new_subs:
@@ -116,8 +119,7 @@ class ExitMonitor:
             f'Thresholds: bad<{bad_imb}, good>={good_imb}'
         )
 
-        log_counter = 0
-        LOG_EVERY_N_UPDATES = 30
+        last_log_time = 0
 
         try:
             while True:
@@ -145,10 +147,9 @@ class ExitMonitor:
                 else:
                     effective_imb = raw_imb
 
-                # Log only every N updates
-                log_counter += 1
-                if log_counter >= LOG_EVERY_N_UPDATES:
-                    log_counter = 0
+                now = asyncio.get_event_loop().time()
+                if now - last_log_time >= 60:
+                    last_log_time = now
                     logger.info(
                         f'📊 IMB {sym} ({direction}): raw={raw_imb:.2f} eff={effective_imb:.2f} | '
                         f'bad_ticks={bad_tick_count}/{bad_ticks_required}'
@@ -172,10 +173,19 @@ class ExitMonitor:
 
                 if bad_tick_count >= bad_ticks_required:
                     reason = f'{"Buyer" if is_put else "Seller"} dominance ({raw_imb:.2f})'
-                    await self.notifier.squared_off(sym, reason)
-                    logger.critical(f'⚠️ Exit Triggered: {sym} ({direction}) - {reason}')
-                    self.bridge.square_off_single(sid)
-                    break
+
+                    if trade.get('is_manual', False):
+                        # Manual Trade: ALERT ONLY
+                        logger.critical(f'🚨 MANUAL TRADE ALERT: {sym} ({direction}) - {reason}')
+                        # Reset counter to avoid spamming every update, or keep warning?
+                        # Let's reset purely to allow "re-alerting" later if it persists
+                        bad_tick_count = 0
+                    else:
+                        # Auto Trade: EXECUTE EXIT
+                        await self.notifier.squared_off(sym, reason)
+                        logger.critical(f'⚠️ Exit Triggered: {sym} ({direction}) - {reason}')
+                        self.bridge.square_off_single(sid)
+                        break
 
         finally:
             self.active_monitors.discard(sym)

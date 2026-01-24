@@ -52,6 +52,8 @@ IGNORE_KEYWORDS = frozenset(
         'FUTURE',
         'FUTURES',
         'CLOSE',
+        'WATCHLIST',
+        'WATCH',
     }
 )
 
@@ -71,13 +73,21 @@ NOISE_WORDS = frozenset(
         'MORNING',
         'ROCKET',
         'BTST',
+        'POSITIONAL',
     }
 )
 
 # Compiled regex patterns
 RE_POSITIONAL = re.compile(r'\bPOSITION(AL)?|HOLD|LONG\s*TERM\b', re.I)
+# Regex to handle:
+# 1. Optional Action (BUY/SELL) - potentially attached to name (e.g. BUYPOLYCAB)
+# 2. Underlying Name (A-Z & -)
+# 3. Optional Date (e.g. 27 JAN) - non-capturing group for skipping
+# 4. Strike Price (digits or decimals)
+# 5. Option Type (CE/PE/CALL/PUT)
 RE_STOCK_NAME = re.compile(
-    r'\b(?:BUY|SELL)\s+([A-Z0-9\s&\-]+?)\s+\d+(?:\.\d+)?\s*(CE|PE|CALL|PUT)\b', re.I
+    r'\b(?:(?:BUY|SELL)\s*)?([A-Z0-9\s&\-]+?)(?:\s*\d+\s+(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC))?\s+(\d+(?:\.\d+)?)\s*(CE|PE|CALL|PUT)\b',
+    re.I,
 )
 RE_DATE = re.compile(
     r'\b(\d{1,2})(?:st|nd|rd|th)?\s*(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\b', re.I
@@ -191,26 +201,58 @@ def detect_underlying(text: str) -> Optional[str]:
         return 'NIFTY'
 
     # Try to extract stock name
-    match = RE_STOCK_NAME.search(text)
+    match = RE_STOCK_NAME.search(clean)
     if match:
-        return match.group(1).replace(' ', '').upper()
+        raw_name = match.group(1)
+        # Fix: Regex greedily captures month (e.g. VOLTAS FEB -> VOLTASFEB)
+        # Remove any month names from the end of the detected name
+        for m in [
+            'JAN',
+            'FEB',
+            'MAR',
+            'APR',
+            'MAY',
+            'JUN',
+            'JUL',
+            'AUG',
+            'SEP',
+            'OCT',
+            'NOV',
+            'DEC',
+        ]:
+            if raw_name.endswith(f' {m}'):
+                raw_name = raw_name[: -len(m) - 1]
+            elif raw_name.endswith(m):  # merged
+                raw_name = raw_name[: -len(m)]
+
+        return raw_name.replace(' ', '').upper()
 
     return None
 
 
+RE_MONTH_ONLY = re.compile(r'\b(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\b', re.I)
+
+
 def extract_explicit_date(text: str) -> Optional[str]:
     """
-    Extract explicit expiry date from text (e.g., "25 DEC").
+    Extract explicit expiry date or month from text.
 
     Args:
         text: Signal text to parse.
 
     Returns:
-        Date label like "25 DEC" or None.
+        Label like "25 DEC" or "FEB" or None.
     """
+    # 1. Try full date (25 DEC)
     match = RE_DATE.search(text)
     if match:
         return f'{int(match.group(1)):02d} {match.group(2).upper()}'
+
+    # 2. Try month only (FEB)
+    match = RE_MONTH_ONLY.search(text)
+    if match:
+        return match.group(1).upper()
+
     return None
 
 
@@ -267,7 +309,7 @@ def parse_single_block(text: str, ref_date: Optional[date] = None) -> Dict[str, 
         return result
 
     # Extract core signal components
-    result['action'] = 'BUY' if 'BUY' in clean else ('SELL' if 'SELL' in clean else None)
+    result['action'] = 'SELL' if 'SELL' in clean else 'BUY'
     result['underlying'] = detect_underlying(clean)
 
     strike_match = RE_STRIKE.search(clean)

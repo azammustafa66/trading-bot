@@ -1,6 +1,7 @@
-from telethon.sync import TelegramClient
 import os
+
 from dotenv import load_dotenv
+from telethon.sync import TelegramClient
 
 # Load environment variables
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env'))
@@ -20,4 +21,4 @@ with TelegramClient(session_name, int(api_id), api_hash) as client:
             print('-' * 20)
     print(
         '\nCopy the ID of the channel you want to listen to and paste it into TARGET_CHANNEL_ID in .env'
-    )
+    ) # noqa: E501

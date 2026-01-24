@@ -89,6 +89,8 @@ def fetch_pnl() -> dict:
         }
 
         resp = requests.get(f'{DHAN_BASE_URL}/positions', headers=headers, timeout=10)
+        # print(f"DEBUG: PnL Fetch Status: {resp.status_code}")
+
         if resp.status_code == 200:
             positions = resp.json()
             if isinstance(positions, dict):
@@ -106,11 +108,14 @@ def fetch_pnl() -> dict:
                 'realized': realized,
                 'unrealized': unrealized,
                 'total': realized + unrealized,
-                'updated_at': datetime.now().strftime('%H:%M'),
+                'updated_at': datetime.now().strftime('%H:%M:%S'),
             }
             last_pnl_fetch = now
+        else:
+            print(f'PnL Fetch Failed: {resp.status_code} {resp.text}')
 
-    except Exception:
+    except Exception as e:
+        print(f'PnL Fetch Error: {e}')
         pass
 
     return pnl_cache
