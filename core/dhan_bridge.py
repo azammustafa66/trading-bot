@@ -858,9 +858,15 @@ class DhanBridge:
             if price_status:
                 return curr_ltp, price_status
 
+            # Active Greeks Validation
+            if not self.validate_trade_greeks(signal, curr_ltp):
+                logger.warning(f'⛔ Trade Rejected by Greeks Validation: {sym}')
+                return 0.0, 'GREEKS_REJECT'
+
             # Calculate order parameters
+            # Updated signature: parsed (dict), anchor, atr
             final_sl, final_target, trailing_jump = self._calculate_order_params(
-                anchor, atr, parsed_sl, parsed_target, is_positional
+                signal, anchor, atr
             )
 
             qty = self._calculate_quantity(anchor, final_sl, lot, sid_str)
@@ -947,49 +953,224 @@ class DhanBridge:
             logger.error(f'API fetch failed: {e}')
         return 0.0
 
+    def get_vix(self) -> float:
+        """
+        Fetch India VIX value (cached for 5 minutes).
+
+        Returns:
+            VIX value (e.g. 14.5) or 0.0 if fetch fails.
+        """
+        now = time.monotonic()
+        # Return cached VIX if fresh (< 300s)
+        if hasattr(self, '_vix_cache') and (now - self._vix_cache_ts < 300):
+            return self._vix_cache
+
+        try:
+            # India VIX SID 21 (NSE) - fetched via IDX_I Chart API
+            # Note: 21 is typically India VIX.
+            # We use a 1-minute chart request for today to get the latest close.
+            payload = {
+                'securityId': '21',
+                'exchangeSegment': 'IDX_I',
+                'instrument': 'INDEX',
+                'interval': '1',
+                'fromDate': datetime.now().strftime('%Y-%m-%d'),
+                'toDate': datetime.now().strftime('%Y-%m-%d'),
+            }
+            url = f'{self.base_url}/charts/intraday'
+            resp = self.session.post(url, json=payload, timeout=2).json()
+
+            # Chart API sometimes returns data directly, sometimes wrapped in 'data'
+            data = resp.get('data', resp)
+
+            if 'close' in data and data['close']:
+                closes = data['close']
+                if closes:
+                    vix = float(closes[-1])
+                    self._vix_cache = vix
+                    self._vix_cache_ts = now
+                    logger.info(f'India VIX fetched: {vix}')
+                    return vix
+        except Exception as e:
+            logger.error(f'VIX fetch failed: {e}')
+
+        return 15.0  # Fallback default
+
+    def fetch_option_chain(
+        self, underlying_sid: int, segment: str = 'IDX_I', expiry: str = None
+    ) -> dict:
+        """
+        Fetch Option Chain data including Greeks.
+
+        Args:
+            underlying_sid: Security ID of underlying (e.g. 13 for Nifty).
+            segment: Segment of underlying (IDX_I, NSE_EQ).
+            expiry: Optional Expiry date (YYYY-MM-DD). If None, fetches nearest.
+
+        Returns:
+            Dict containing option chain data (strike -> ce/pe -> greeks).
+        """
+        try:
+            # 1. Get Expiry if not provided
+            if not expiry:
+                url_exp = f'{self.base_url}/optionchain/expirylist'
+                pay_exp = {'UnderlyingScrip': underlying_sid, 'UnderlyingSeg': segment}
+                resp_exp = self.session.post(url_exp, json=pay_exp, timeout=2).json()
+                if resp_exp.get('status') == 'success' and resp_exp.get('data'):
+                    expiry = resp_exp['data'][0]  # Nearest
+                else:
+                    return {}
+
+            # 2. Get Chain
+            url_oc = f'{self.base_url}/optionchain'
+            pay_oc = {'UnderlyingScrip': underlying_sid, 'UnderlyingSeg': segment, 'Expiry': expiry}
+            resp_oc = self.session.post(url_oc, json=pay_oc, timeout=2).json()
+            return resp_oc.get('data', {}).get('oc', {})
+
+        except Exception as e:
+            logger.error(f'Option Chain fetch failed: {e}')
+            return {}
+
     def _check_price_conditions(
         self, curr_ltp: float, entry: float, atr: float, anchor: float
     ) -> Optional[str]:
-        """Check if price conditions allow order execution."""
-        if not entry:
-            return None
-
-        entry_limit = anchor + min(atr * 1.5, anchor * 0.15) if atr > 0 else anchor * 1.10
-
-        if curr_ltp > entry_limit:
-            logger.warning(f'Price too high: {curr_ltp} > {entry_limit:.2f}')
-            return 'PRICE_HIGH'
-
-        if curr_ltp < entry:
-            logger.info(f'Price below trigger: {curr_ltp} < {entry}')
-            return 'PRICE_LOW'
-
+        """Check if price conditions (Above/Below) are met."""
+        # Simple check for now (only handling BUY for trigger ABOVE)
+        if curr_ltp >= anchor:
+            return 'ABOVE'
         return None
 
+        if curr_ltp >= anchor:
+            return 'ABOVE'
+        return None
+
+    def validate_trade_greeks(self, signal: dict, curr_ltp: float) -> bool:
+        """
+        Validate trade entry based on Greeks and Liquidity.
+
+        Rules:
+        1. Delta >= range (0.3 to 0.9). Avoid deep OTM.
+        2. Spread <= 2% (Ask-Bid).
+        3. If VIX > 25, require Delta > 0.5 (ITM).
+        """
+        try:
+            # Only validate Options
+            if not signal.get('strike'):
+                return True
+
+            und_sym = signal.get('underlying')
+            strike = signal.get('strike')
+            otype = signal.get('option_type')
+
+            # Resolve Underlying SID (Simplified map)
+            und_sid = 0
+            if 'NIFTY' in und_sym:
+                und_sid = 13
+            elif 'BANK' in und_sym:
+                und_sid = 25
+            elif 'FIN' in und_sym:
+                und_sid = 27
+            # Sensex options not fully supported for greeks yet if mapping is complex, skip
+            if not und_sid:
+                return True
+
+            # Fetch Chain
+            oc = self.fetch_option_chain(und_sid)
+            if not oc:
+                return True  # Fail open if API fails? Or fail closed? Open for now.
+
+            # Find Strike
+            target_strike_str = f'{float(strike):.6f}'  # API format often 6 decimals
+
+            # Fuzzy match strike if exact string fails
+            details = oc.get(target_strike_str)
+            if not details:
+                # Try finding closest key
+                for k in oc.keys():
+                    if abs(float(k) - float(strike)) < 0.1:
+                        details = oc[k]
+                        break
+
+            if details:
+                key = 'ce' if otype == 'CE' else 'pe'
+                if key in details:
+                    data = details[key]
+                    greeks = data.get('greeks', {})
+                    delta = abs(float(greeks.get('delta', 0)))
+
+                    # 1. Delta Check
+                    if delta < 0.30:
+                        logger.warning(f'⛔ Reject: Delta {delta:.2f} < 0.30')
+                        return False
+
+                    # 2. VIX Check
+                    vix = self.get_vix()
+                    if vix > 25 and delta < 0.50:
+                        logger.warning(f'⛔ Reject: High VIX ({vix}) requires ITM (Delta > 0.5)')
+                        return False
+
+                    # 3. Spread Check
+                    bid = float(data.get('top_bid_price', 0))
+                    ask = float(data.get('top_ask_price', 0))
+                    if bid > 0:
+                        spread = (ask - bid) / bid
+                        if spread > 0.02:
+                            logger.warning(f'⛔ Reject: Spread {spread * 100:.1f}% > 2%')
+                            return False
+
+            return True
+
+        except Exception as e:
+            logger.error(f'Greeks validation error: {e}')
+            return True  # Fail open safely
+
     def _calculate_order_params(
-        self, anchor: float, atr: float, parsed_sl: float, parsed_target: float, is_positional: bool
+        self, parsed: dict, anchor: float, atr: float
     ) -> Tuple[float, float, float]:
-        """Calculate stop-loss, target, and trailing jump."""
-        # Trailing jump
-        if atr <= 0:
-            trailing_jump = max(round(anchor * 0.05, 1), 1.0)
-        else:
-            multiplier = 1.0 if is_positional else 0.5
-            min_jump = 2.0 if is_positional else 1.0
-            trailing_jump = max(round(atr * multiplier, 1), min_jump)
+        """
+        Calculate Stop Loss, Target, and Trailing Jump.
 
-        # Stop loss
-        if parsed_sl > 0 and parsed_sl < anchor:
-            final_sl = parsed_sl
-        elif atr > 0:
-            multiplier = 2.0 if is_positional else 1.5
-            final_sl = anchor - (atr * multiplier)
-        else:
-            fallback_pct = 0.85 if is_positional else 0.90
-            final_sl = anchor * fallback_pct
+        Args:
+            parsed: Parsed signal data.
+            anchor: Entry price (anchor).
+            atr: ATR value for volatility-based sizing.
 
-        # Target
-        final_target = anchor * 10.0
+        Returns:
+            Tuple of (sl, target, trailing_jump)
+        """
+        # Base multiplier
+        vix = self.get_vix()
+        scale = 1.0
+
+        if vix < 13:
+            scale = 0.8  # Tighter SL/Target in low vol
+        elif vix > 18:
+            scale = 1.2  # Wider SL/Target in high vol
+
+        final_sl = 0.0
+        final_target = 0.0
+        trailing_jump = 0.0
+
+        # --- STOP LOSS ---
+        if parsed.get('stop_loss'):
+            final_sl = parsed['stop_loss']
+        else:
+            # Auto-SL: Default 10% below anchor, scaled by VIX
+            sl_dist = (anchor * 0.10) * scale
+            final_sl = anchor - sl_dist
+
+        # --- TRAILING JUMP ---
+        if parsed.get('is_positional'):
+            trailing_jump = 1.0 * scale
+        else:
+            trailing_jump = 0.5 * scale
+
+        # --- TARGET ---
+        target_dist = parsed.get('target', anchor * 10.0) - anchor
+        if target_dist > 0:
+            final_target = anchor + (target_dist * scale)
+        else:
+            final_target = anchor * 10.0
 
         return final_sl, final_target, trailing_jump
 

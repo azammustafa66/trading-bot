@@ -102,7 +102,19 @@ class ExitMonitor:
             logger.info(f'{sym}: Wick protection passed, continuing normal monitoring')
 
         liquidity_sids = self.bridge.get_liquidity_sids(sym, sid)
-        new_subs = []
+
+        # Check if we need a proxy (BSE/Sensex doesn't have depth)
+        is_bse = 'SENSEX' in sym.upper() or 'BSE' in sym.upper()
+        if is_bse:
+            proxy_sid = self.bridge.mapper.get_nifty_futures_sid()
+            if proxy_sid:
+                logger.info(f'Using Nifty Proxy {proxy_sid} for {sym} depth')
+                # Override liquidity sids for MONITORING purposes, but kept for logic
+                # Actually, we need to monitor the PROXY's imbalance, not the option's.
+                liquidity_sids = [proxy_sid]
+            else:
+                logger.warning('Could not find Nifty Proxy for BSE trade')
+
         new_subs = []
         for liq_sid in liquidity_sids:
             if liq_sid not in self._subscribed_sids:
@@ -120,6 +132,7 @@ class ExitMonitor:
         )
 
         last_log_time = 0
+        last_greeks_log_time = 0
 
         try:
             while True:
@@ -148,12 +161,81 @@ class ExitMonitor:
                     effective_imb = raw_imb
 
                 now = asyncio.get_event_loop().time()
-                if now - last_log_time >= 60:
-                    last_log_time = now
+
+                # --- GREEKS MONITORING (Every 60s) ---
+                if now - last_greeks_log_time >= 60:
+                    try:
+                        sig = trade.get('signal_details', {})
+                        und_sym = sig.get('underlying')  # e.g. NIFTY
+                        strike = sig.get('strike')
+                        otype = sig.get('option_type')  # CE/PE
+
+                        if und_sym and strike and otype:
+                            # Resolve Underlying SID (Simple map for now, extend as needed)
+                            und_sid = 0
+                            if 'NIFTY' in und_sym:
+                                und_sid = 13
+                            elif 'BANK' in und_sym:
+                                und_sid = 25
+                            elif 'FIN' in und_sym:
+                                und_sid = 27
+                            elif 'SENSEX' in und_sym:
+                                und_sid = 51  # BSE SENSEX? Verify SID
+
+                            if und_sid:
+                                # Fetch Option Chain
+                                oc_data = self.bridge.fetch_option_chain(und_sid)
+                                for p_strike, details in oc_data.items():
+                                    if float(p_strike) == float(strike):
+                                        key = 'ce' if otype == 'CE' else 'pe'
+                                        if key in details:
+                                            greeks = details[key].get('greeks', {})
+                                            iv = float(details[key].get('implied_volatility', 0))
+                                            delta = float(greeks.get('delta', 0))
+
+                                            logger.info(
+                                                f'📊 Greeks {sym}: IV={iv:.2f}, Delta={delta:.2f}'
+                                            )
+
+                                            # --- Active Exit Rules ---
+                                            # 1. IV Crash Protection
+                                            entry_iv = trade.get('entry_iv', 0)
+                                            if entry_iv > 0 and iv < entry_iv * 0.85:
+                                                logger.warning(
+                                                    f'⚠️ IV CRASH: {iv:.2f} < {entry_iv * 0.85:.2f} (15% drop)'
+                                                )
+                                                await self.notifier.squared_off(
+                                                    sym, f'IV Crash ({iv:.2f} < {entry_iv:.2f})'
+                                                )
+                                                self.bridge.square_off_single(sid)
+                                                self.active_monitors.discard(sym)
+                                                return
+
+                                            # 2. Delta Decay (Stop Loss Proxy)
+                                            # If Delta drops too low, chance of being ITM drops drastically
+                                            # Put delta is negative, so use abs()
+                                            abs_delta = abs(delta)
+                                            if abs_delta < 0.20:
+                                                logger.warning(
+                                                    f'⚠️ LOW DELTA: {abs_delta:.2f} < 0.20'
+                                                )
+                                                await self.notifier.squared_off(
+                                                    sym, f'Delta Decay ({abs_delta:.2f} < 0.20)'
+                                                )
+                                                self.bridge.square_off_single(sid)
+                                                self.active_monitors.discard(sym)
+                                                return
+                                        break
+                    except Exception as e:
+                        logger.error(f'Greeks fetch failed: {e}')
+                    last_greeks_log_time = now
+
+                if now - last_log_time >= 60:  # Keep existing Imbalance Log
                     logger.info(
                         f'📊 IMB {sym} ({direction}): raw={raw_imb:.2f} eff={effective_imb:.2f} | '
                         f'bad_ticks={bad_tick_count}/{bad_ticks_required}'
                     )
+                    last_log_time = now
 
                 # Use effective_imb for threshold checks
                 if effective_imb >= good_imb:

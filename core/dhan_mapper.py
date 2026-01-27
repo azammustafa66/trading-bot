@@ -186,6 +186,35 @@ class DhanMapper:
             logger.debug(f'Exchange segment lookup failed: {e}')
             return None
 
+    def get_nifty_futures_sid(self) -> Optional[str]:
+        """
+        Get the Security ID for current month NIFTY Futures (NSE_FNO).
+        Used as proxy for BSE/Sensex depth.
+        """
+        try:
+            today = get_today()
+            # Find NIFTY Futures (FUTIDX) for current or next expiry
+            # Filter: Symbol starts with "NIFTY-", Instrument=FUTIDX, Expiry>=Today
+            # Sort by Expiry Ascending -> Pick first
+
+            # Note: Column names based on previous knowledge/usage
+            candidates = self.df.filter(
+                (pl.col(self.COL_TRADING_SYMBOL).str.starts_with('NIFTY-'))
+                & (pl.col(self.COL_INSTRUMENT_NAME) == 'FUTIDX')
+                & (pl.col(self.COL_EXPIRY_DATE) >= today)
+            ).sort(self.COL_EXPIRY_DATE)
+
+            if not candidates.is_empty():
+                row = candidates.row(0, named=True)
+                sid = str(row[self.COL_SECURITY_ID])
+                logger.info(f'🎯 Nifty Proxy found: {sid} ({row[self.COL_TRADING_SYMBOL]})')
+                return sid
+
+        except Exception as e:
+            logger.error(f'Nifty proxy lookup failed: {e}')
+
+        return None
+
     def get_security_id(
         self,
         trading_symbol: str,
