@@ -182,10 +182,6 @@ class DhanMapper:
             logger.debug(f'Exchange segment lookup failed: {e}')
             return None
 
-        except Exception as e:
-            logger.debug(f'Exchange segment lookup failed: {e}')
-            return None
-
     def get_security_id(
         self,
         trading_symbol: str,

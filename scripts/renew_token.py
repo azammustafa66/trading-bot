@@ -56,7 +56,7 @@ def renew_token():
 
     client_id = os.getenv('DHAN_CLIENT_ID')
     pin = os.getenv('DHAN_PIN')
-    totp_secret = os.getenv('DHAN_TOTP_SECRET')
+    totp_secret = os.getenv('DHAN_TOTP_SECRET', '')
 
     if not all([client_id, pin, totp_secret]):
         logger.error('Missing credentials in .env (DHAN_CLIENT_ID, DHAN_PIN, or DHAN_TOTP_SECRET)')

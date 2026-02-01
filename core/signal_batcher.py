@@ -83,7 +83,7 @@ class SignalBatcher:
     def start_manual_monitor(self, pos: Dict[str, Any]):
         """Start monitoring a manually opened position."""
         sid = str(pos['securityId'])
-        sym = pos['tradingSymbol']
+        sym = str(pos['tradingSymbol'])
         qty = int(pos.get('netQty', 0))
 
         # Determine direction for imbalance check

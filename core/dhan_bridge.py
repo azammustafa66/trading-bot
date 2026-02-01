@@ -18,6 +18,7 @@ import asyncio
 import logging
 import math
 import os
+import statistics
 import threading
 import time
 from datetime import datetime, timedelta
@@ -292,7 +293,7 @@ class DhanBridge:
             return 5.0
 
         imb = round(buy_vol / sell_vol, 2)
-        self._log_imbalance(security_id, imb, buy_vol, sell_vol, time_diff)
+        # self._log_imbalance(security_id, imb, buy_vol, sell_vol, time_diff)
 
         return imb
 
@@ -307,13 +308,33 @@ class DhanBridge:
     def _apply_anti_spoofing(
         self, bids: List[Dict], asks: List[Dict], buy_vol: int, sell_vol: int
     ) -> Tuple[int, int]:
-        """Discount suspiciously large orders that may be spoofing."""
-        for i in range(min(2, len(bids), len(asks))):
-            if int(bids[i]['qty']) >= buy_vol * 0.7:
-                buy_vol -= int(bids[i]['qty'])
-            if int(asks[i]['qty']) >= sell_vol * 0.7:
-                sell_vol -= int(asks[i]['qty'])
-        return buy_vol, sell_vol
+        """
+        Cap outliers that are > 3x the average volume of the top 20 levels.
+        This prevents massive fake walls from skewing the ratio, while still
+        counting them as valid resistance/support (capped at 3x average).
+        """
+        # Analyze top 20 levels
+        depth = 20
+
+        # Calculate averages (excluding zeros)
+        bid_qtys = [int(b['qty']) for b in bids[:depth]]
+        ask_qtys = [int(a['qty']) for a in asks[:depth]]
+
+        avg_bid = statistics.mean(bid_qtys) if bid_qtys else 0
+        avg_ask = statistics.mean(ask_qtys) if ask_qtys else 0
+
+        # Cap outliers
+        capped_buy_vol = 0
+        for qty in bid_qtys:
+            limit = avg_bid * 3
+            capped_buy_vol += min(qty, limit) if limit > 0 else qty
+
+        capped_sell_vol = 0
+        for qty in ask_qtys:
+            limit = avg_ask * 3
+            capped_sell_vol += min(qty, limit) if limit > 0 else qty
+
+        return int(capped_buy_vol), int(capped_sell_vol)
 
     def _log_imbalance(
         self, security_id: str, imb: float, buy_vol: int, sell_vol: int, time_diff: float
@@ -332,13 +353,9 @@ class DhanBridge:
         """
         Get security IDs for liquidity analysis (option + underlying future).
 
-        Args:
-            sym: Trading symbol (e.g., "NIFTY 24500 CE").
-            option_sid: Security ID of the option.
-
-        Returns:
-            List containing [option_sid, futures_sid] if available,
-            otherwise just [option_sid].
+        Special Handling:
+        - SENSEX options use NIFTY Futures as proxy because BSE derivatives
+          often lack liquid futures or reliable depth data.
         """
         sids = [option_sid]
         sym_upper = sym.upper()
@@ -348,13 +365,17 @@ class DhanBridge:
             underlying = 'BANKNIFTY'
         elif 'NIFTY' in sym_upper or 'SENSEX' in sym_upper:
             underlying = 'NIFTY'
+        elif 'FINNIFTY' in sym_upper:
+            underlying = 'FINNIFTY'
+        elif any(lambda x: x in sym_upper for x in ['MIDCPNIFTY', 'MIDCAP NIFTY', 'NIFTY MIDCAP']):
+            underlying = 'MIDCPNIFTY'
         else:
             underlying = sym.split()[0]
 
         fut_sid, _ = self.mapper.get_underlying_future_id(underlying)
         if fut_sid:
             sids.append(str(fut_sid))
-            logger.info(f'Liquidity proxy added: FUT {fut_sid}')
+            logger.info(f'Liquidity proxy added: FUT {fut_sid} for {sym}')
 
         return sids
 
@@ -917,7 +938,7 @@ class DhanBridge:
 
         return curr_ltp
 
-    def _fetch_ltp_from_api(self, sid: str, exch_seg: str = None) -> float:
+    def _fetch_ltp_from_api(self, sid: str, exch_seg: str = '') -> float:
         """Fetch LTP via Dhan ticker API."""
         try:
             if not exch_seg:
@@ -982,10 +1003,11 @@ class DhanBridge:
         if parsed_sl > 0 and parsed_sl < anchor:
             final_sl = parsed_sl
         elif atr > 0:
-            multiplier = 2.0 if is_positional else 1.5
+            multiplier = 1.75 if is_positional else 1.2  # Tightened from 1.5
             final_sl = anchor - (atr * multiplier)
         else:
-            fallback_pct = 0.85 if is_positional else 0.90
+            # Fallback pct: Tightened Intraday from 0.90 (10%) to 0.94 (6%)
+            fallback_pct = 0.85 if is_positional else 0.94
             final_sl = anchor * fallback_pct
 
         # Target

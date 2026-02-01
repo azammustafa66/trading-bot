@@ -24,9 +24,11 @@ def get_imbalance_rules(sym: str) -> Dict[str, float]:
     Index options have tighter thresholds due to higher liquidity.
     """
     if 'NIFTY' in sym.upper() or 'BANKNIFTY' in sym.upper() or 'SENSEX' in sym.upper():
-        return {'bad_imb': 0.20, 'good_imb': 2.8, 'bad_ticks': 4}
+        # High liquidity: Require 10 seconds of persistent bad imbalance
+        return {'bad_imb': 0.20, 'good_imb': 2.8, 'bad_ticks': 10}
     else:
-        return {'bad_imb': 0.35, 'good_imb': 2.2, 'bad_ticks': 6}
+        # Lower liquidity: Slightly more tolerance
+        return {'bad_imb': 0.30, 'good_imb': 2.5, 'bad_ticks': 10}
 
 
 class ExitMonitor:

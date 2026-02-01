@@ -37,7 +37,7 @@ SESSION_NAME = os.getenv('SESSION_NAME', 'telegram_session')
 ADMIN_ID = int(os.getenv('ADMIN_ID', ''))
 
 RAW_CHANNELS = os.getenv('TARGET_CHANNELS', os.getenv('TARGET_CHANNEL', ''))
-TARGET_CHANNELS = [x.strip() for x in RAW_CHANNELS.split(',') if x.strip()]
+TARGET_CHANNELS = [int(x) for x in RAW_CHANNELS.split(',') if x.strip()]
 
 # Add numeric ID support
 TARGET_CHANNEL_ID = os.getenv('TARGET_CHANNEL_ID', '')
@@ -137,7 +137,7 @@ async def main():
         if event.message and event.message.message:
             await batcher.add_message(event.message.message, event.message.date, event.chat_id)
 
-    await client.run_until_disconnected()  # pyright: ignore[reportGeneralTypeIssues]
+    await client.run_until_disconnected() # pyright: ignore[reportGeneralTypeIssues]
 
 
 if __name__ == '__main__':

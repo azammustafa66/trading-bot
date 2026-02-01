@@ -286,16 +286,16 @@ def parse_single_block(text: str, ref_date: Optional[date] = None) -> Dict[str, 
 
     result: Dict[str, Any] = {
         'raw': raw,
-        'action': None,
-        'underlying': None,
+        'action': '',
+        'underlying': '',
         'strike': None,
-        'option_type': None,
+        'option_type': '',
         'trigger_above': None,
         'stop_loss': None,
         'target': None,
         'is_positional': bool(RE_POSITIONAL.search(clean)),
-        'expiry_label': None,
-        'trading_symbol': None,
+        'expiry_label': '',
+        'trading_symbol': '',
         'ignore': False,
     }
 
