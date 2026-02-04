@@ -30,7 +30,7 @@ try:
     from zoneinfo import ZoneInfo
 
     IST = ZoneInfo('Asia/Kolkata')
-except Exception:
+except ImportError:
     IST = None
 
 # Configuration
@@ -230,7 +230,8 @@ def detect_underlying(text: str) -> Optional[str]:
     return None
 
 
-RE_MONTH_ONLY = re.compile(r'\b(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\b', re.I)
+RE_MONTH_ONLY = re.compile(
+    r'\b(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\b', re.I)
 
 
 def extract_explicit_date(text: str) -> Optional[str]:
@@ -315,7 +316,8 @@ def parse_single_block(text: str, ref_date: Optional[date] = None) -> Dict[str, 
     strike_match = RE_STRIKE.search(clean)
     if strike_match:
         result['strike'] = int(strike_match.group(1))
-        result['option_type'] = 'CALL' if strike_match.group(2).startswith('C') else 'PUT'
+        result['option_type'] = 'CALL' if strike_match.group(
+            2).startswith('C') else 'PUT'
 
     # Extract prices
     if match := RE_TRIGGER.search(clean):
@@ -329,7 +331,8 @@ def parse_single_block(text: str, ref_date: Optional[date] = None) -> Dict[str, 
         result['target'] = max(map(float, values)) if values else None
 
     # Validate required fields
-    required = [result['action'], result['underlying'], result['strike'], result['option_type']]
+    required = [result['action'], result['underlying'],
+                result['strike'], result['option_type']]
     if not all(required):
         result['ignore'] = True
         return result
@@ -350,7 +353,7 @@ def parse_single_block(text: str, ref_date: Optional[date] = None) -> Dict[str, 
             f'{result["underlying"]} {expiry_label} {result["strike"]} {result["option_type"]}'
         )
 
-    except Exception as e:
+    except (ValueError, IndexError, AttributeError) as e:
         logger.warning(f'Symbol generation failed: {e}')
         result['ignore'] = True
 
@@ -431,11 +434,13 @@ def _parse_message_batch(messages: List[str], dates: List[datetime]) -> List[Dic
             continue
 
         # Check if this starts a new signal
-        is_new_signal = bool(re.search(r'\b(BUY|SELL)\b', text.upper()) and detect_underlying(text))
+        is_new_signal = bool(
+            re.search(r'\b(BUY|SELL)\b', text.upper()) and detect_underlying(text))
 
         curr_ts = to_ist(dt)
         last_ts = to_ist(buffer_dates[-1]) if buffer_dates else None
-        is_stale = curr_ts and last_ts and (curr_ts - last_ts).total_seconds() > 300
+        is_stale = curr_ts and last_ts and (
+            curr_ts - last_ts).total_seconds() > 300
 
         # Flush buffer if new signal, stale, or price-only followup
         if buffer and (is_new_signal or is_stale or is_price_only(text)):
@@ -551,4 +556,5 @@ if __name__ == '__main__':
         trig = str(r['trigger_above']) if r['trigger_above'] else '---'
         sl = str(r['stop_loss']) if r['stop_loss'] else '---'
         target = str(r['target']) if r['target'] else '---'
-        print(f'{r["trading_symbol"]:<35} | {r["action"]:<5} | {trig:<5} | {sl:<5} | {target}')
+        print(
+            f'{r["trading_symbol"]:<35} | {r["action"]:<5} | {trig:<5} | {sl:<5} | {target}')

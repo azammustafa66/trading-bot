@@ -48,8 +48,11 @@ class Notifier:
         """
         try:
             await self.client.send_message(self.chat_id, message)
-        except Exception as e:
+        except (ValueError, IOError) as e:
             logger.error(f'Telegram notify failed: {e}')
+        except Exception as e:
+            # Catch-all for unknown Telethon errors
+            logger.error(f'Telegram unknown error: {e}')
 
     async def started_bot(self) -> None:
         """Notify that the bot has started."""

@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import sys
+import time
 from logging.handlers import RotatingFileHandler
 
 import pyotp
@@ -33,7 +34,8 @@ def setup_logging():
 
     # File Handler
     os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
-    file_handler = RotatingFileHandler(LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=5)
+    file_handler = RotatingFileHandler(
+        LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=5)
     file_handler.setFormatter(formatter)
 
     # Console Handler
@@ -56,38 +58,49 @@ def renew_token():
 
     client_id = os.getenv('DHAN_CLIENT_ID')
     pin = os.getenv('DHAN_PIN')
-    totp_secret = os.getenv('DHAN_TOTP_SECRET', '')
+    totp_secret = os.getenv('DHAN_TOTP_SECRET', '').strip()
 
     if not all([client_id, pin, totp_secret]):
-        logger.error('Missing credentials in .env (DHAN_CLIENT_ID, DHAN_PIN, or DHAN_TOTP_SECRET)')
+        logger.error(
+            'Missing credentials in .env (DHAN_CLIENT_ID, DHAN_PIN, or DHAN_TOTP_SECRET)')
         sys.exit(1)
 
     logger.info(f'Logging in with Client ID: {client_id}')
 
-    try:
-        # Generate TOTP
-        totp = pyotp.TOTP(totp_secret).now()
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        try:
+            # Generate TOTP
+            totp = pyotp.TOTP(totp_secret).now()
 
-        # Login
-        dhan = DhanLogin(client_id)
-        response = dhan.generate_token(pin, totp)
+            # Login
+            dhan = DhanLogin(client_id)
+            response = dhan.generate_token(pin, totp)
 
-        # Handle both camelCase (API) and snake_case (potential wrapper) keys
-        new_token = response.get('accessToken') or response.get('access_token')
+            # Handle both camelCase (API) and snake_case (potential wrapper) keys
+            new_token = response.get(
+                'accessToken') or response.get('access_token')
 
-        if not new_token:
-            logger.error(f'Login Failed! Response: {response}')
-            sys.exit(1)
+            if new_token:
+                logger.info(
+                    f'Login Successful on attempt {attempt}. New Token Generated.')
+                # Update .env file
+                update_env_file(new_token)
+                logger.info('Successfully updated .env file.')
+                return  # Success, exit function
 
-        logger.info('Login Successful. New Token Generated.')
+            logger.warning(
+                f'Login Failed on attempt {attempt}! Response: {response}')
 
-        # Update .env file
-        update_env_file(new_token)
-        logger.info('Successfully updated .env file.')
+        except Exception as e:
+            logger.error(f'Error during renewal on attempt {attempt}: {e}')
 
-    except Exception as e:
-        logger.error(f'Error during renewal: {e}')
-        sys.exit(1)
+        if attempt < max_retries:
+            logger.info('Retrying in 2 seconds...')
+            time.sleep(2)
+
+    logger.error(f'All {max_retries} attempts failed. Exiting.')
+    sys.exit(1)
 
 
 def update_env_file(new_token):

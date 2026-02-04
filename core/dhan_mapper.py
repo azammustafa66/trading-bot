@@ -61,7 +61,8 @@ class DhanMapper:
 
     # Month abbreviations for symbol parsing
     _MONTHS = frozenset(
-        {'JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'}
+        {'JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
+            'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'}
     )
 
     def __init__(self) -> None:
@@ -108,10 +109,12 @@ class DhanMapper:
             Returns empty DataFrame on failure.
         """
         try:
-            df = pl.read_csv(self.CSV_FILE, ignore_errors=True, infer_schema_length=10000)
+            df = pl.read_csv(self.CSV_FILE, ignore_errors=True,
+                             infer_schema_length=10000)
 
             return df.with_columns(
-                pl.col(self.COL_EXPIRY_DATE).str.to_date(format='%Y-%m-%d %H:%M:%S', strict=False),
+                pl.col(self.COL_EXPIRY_DATE).str.to_date(
+                    format='%Y-%m-%d %H:%M:%S', strict=False),
                 pl.col(self.COL_STRIKE_PRICE).cast(pl.Float64, strict=False),
                 pl.col(self.COL_SECURITY_ID).cast(pl.Utf8, strict=False),
             )
@@ -229,13 +232,16 @@ class DhanMapper:
         underlying, strike, opt_type, target_month = parsed
 
         # Step 3: Find candidates matching parsed criteria
-        candidates = self._find_candidates(underlying, strike, opt_type, today, target_month)
+        candidates = self._find_candidates(
+            underlying, strike, opt_type, today, target_month)
         if candidates.is_empty():
-            logger.warning(f'No candidates found for {underlying} {strike} {opt_type}')
+            logger.warning(
+                f'No candidates found for {underlying} {strike} {opt_type}')
             return None, None, 0, 0.0
 
         # Step 4: Select best candidate (by price or nearest expiry)
-        best_row = self._select_best_candidate(candidates, price_ref, ltp_fetcher)
+        best_row = self._select_best_candidate(
+            candidates, price_ref, ltp_fetcher)
 
         return (
             str(best_row[self.COL_SECURITY_ID]),
@@ -249,7 +255,8 @@ class DhanMapper:
     ) -> Optional[Tuple[SecurityId, ExchangeId, LotSize, TickSize]]:
         """Find an exact match for the trading symbol."""
         result = self.df.filter(
-            (pl.col(self.COL_CUSTOM_SYMBOL) == symbol) & (pl.col(self.COL_EXPIRY_DATE) >= today)
+            (pl.col(self.COL_CUSTOM_SYMBOL) == symbol) & (
+                pl.col(self.COL_EXPIRY_DATE) >= today)
         )
 
         if result.is_empty():
@@ -309,7 +316,8 @@ class DhanMapper:
     ) -> pl.DataFrame:
         """Find all option contracts matching the criteria."""
         candidates = self.df.filter(
-            pl.col(self.COL_CUSTOM_SYMBOL).str.contains(rf'\b{underlying}\b', literal=False)
+            pl.col(self.COL_CUSTOM_SYMBOL).str.contains(
+                rf'\b{underlying}\b', literal=False)
             & (pl.col(self.COL_OPTION_TYPE) == opt_type)
             & (pl.col(self.COL_STRIKE_PRICE).round(2) == round(strike, 2))
             & (pl.col(self.COL_EXPIRY_DATE) >= today)
@@ -334,7 +342,8 @@ class DhanMapper:
             }
             month_num = m_map.get(target_month)
             if month_num:
-                candidates = candidates.filter(pl.col(self.COL_EXPIRY_DATE).dt.month() == month_num)
+                candidates = candidates.filter(
+                    pl.col(self.COL_EXPIRY_DATE).dt.month() == month_num)
 
         return candidates.sort(self.COL_EXPIRY_DATE)
 
@@ -359,9 +368,20 @@ class DhanMapper:
                 return best_row
 
         # Default: nearest expiry
-        row = candidates.row(0, named=True)
-        logger.info(f'📍 Selected nearest expiry: {row[self.COL_EXPIRY_DATE]}')
-        return row
+        # "Smart Rollover": If the nearest expiry is TODAY (0-DTE) and we have other options,
+        # we skip it to avoid theta decay (unless the user explicitly requested it via exact match,
+        # which bypasses this method).
+        best_row = candidates.row(0, named=True)
+        expiry_date = best_row[self.COL_EXPIRY_DATE]
+
+        from utils.generate_expiry_dates import get_today
+        if expiry_date == get_today() and candidates.height > 1:
+            logger.info(
+                f'⚠️ Skipping 0-DTE expiry {expiry_date} to avoid decay (Rolling to next)')
+            best_row = candidates.row(1, named=True)
+
+        logger.info(f'📍 Selected expiry: {best_row[self.COL_EXPIRY_DATE]}')
+        return best_row
 
     def _match_by_price(
         self, candidates: pl.DataFrame, price_ref: float, ltp_fetcher: Callable[[str], float]
@@ -411,7 +431,12 @@ class DhanMapper:
         if self.df.is_empty():
             return None, 0.0
 
-        underlying = symbol.split()[0].upper()
+        # Handle both space-separated ("NIFTY 24500 CE") and hyphenated ("SONACOMS-FEB2026-500-PE") formats
+        if '-' in symbol:
+            underlying = symbol.split('-')[0].upper()
+        else:
+            underlying = symbol.split()[0].upper()
+
         logger.info(f'🔮 Finding future for: {underlying}')
 
         try:
@@ -420,7 +445,9 @@ class DhanMapper:
 
             # Filter to matching futures
             futures = self.df.filter(
-                pl.col(self.COL_TRADING_SYMBOL).str.starts_with(underlying)
+                # Ensure prefix match with hyphen to avoid partial matches
+                pl.col(self.COL_TRADING_SYMBOL).str.starts_with(
+                    f"{underlying}-")
                 & pl.col(self.COL_INSTRUMENT_NAME).is_in(['FUTIDX', 'FUTSTK'])
             ).sort(self.COL_EXPIRY_DATE)
 
@@ -471,5 +498,6 @@ class DhanMapper:
             return None
 
         row = result.row(0, named=True)
-        logger.warning(f'⚠️ Using nearest future: {row[self.COL_TRADING_SYMBOL]}')
+        logger.warning(
+            f'⚠️ Using nearest future: {row[self.COL_TRADING_SYMBOL]}')
         return row

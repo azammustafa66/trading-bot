@@ -139,7 +139,7 @@ class DepthFeed:
                 logger.warning(f'Connection closed: {e}')
                 await asyncio.sleep(2)
 
-            except Exception as e:
+            except (OSError, asyncio.TimeoutError) as e:
                 if self._stop:
                     break
                 logger.error(f'Feed error: {e}', exc_info=True)
@@ -170,7 +170,8 @@ class DepthFeed:
             except Exception:
                 logger.info(f'Queued {len(instruments)} subscriptions')
         else:
-            logger.info(f'Queued {len(instruments)} subscriptions (connecting)')
+            logger.info(
+                f'Queued {len(instruments)} subscriptions (connecting)')
 
     async def unsubscribe(self, instruments: List[Dict[str, str]]) -> None:
         """
@@ -224,7 +225,7 @@ class DepthFeed:
             return
 
         for i in range(0, len(instruments), self.SUBSCRIPTION_CHUNK_SIZE):
-            chunk = instruments[i : i + self.SUBSCRIPTION_CHUNK_SIZE]
+            chunk = instruments[i: i + self.SUBSCRIPTION_CHUNK_SIZE]
             payload = {
                 'RequestCode': REQ_SUBSCRIBE,
                 'InstrumentCount': len(chunk),
@@ -238,6 +239,7 @@ class DepthFeed:
                 logger.warning(f'Subscription failed (closed): {e}')
                 raise
             except Exception as e:
+                # Catch-all for unknown subscription errors to prevent loop crash
                 logger.error(f'Subscription error: {e}')
                 raise
 
@@ -256,7 +258,7 @@ class DepthFeed:
                 if end > total_len:
                     break
 
-                payload = data[offset + HEADER_SIZE : end]
+                payload = data[offset + HEADER_SIZE: end]
                 offset = end
 
                 if feed_code not in (FEED_DEPTH_BID, FEED_DEPTH_ASK):
@@ -275,6 +277,9 @@ class DepthFeed:
 
                 self._invoke_callbacks(parsed)
 
+            except struct.error as e:
+                logger.error(f'Binary unpack error: {e}')
+                break
             except Exception as e:
                 logger.error(f'Parse error: {e}', exc_info=True)
                 break
@@ -308,6 +313,7 @@ class DepthFeed:
                 break
 
             price, qty, orders = struct.unpack_from('<dII', payload, i)
-            levels.append({'price': float(price), 'qty': int(qty), 'orders': int(orders)})
+            levels.append(
+                {'price': float(price), 'qty': int(qty), 'orders': int(orders)})
 
         return levels
