@@ -21,8 +21,7 @@ try:
     from core.notifier import Notifier
     from core.signal_batcher import SignalBatcher
 except ImportError as e:
-    sys.stderr.write(
-        f'Import Error: {e}. Ensure you are running from the root directory.\n')
+    sys.stderr.write(f'Import Error: {e}. Ensure you are running from the root directory.\n')
     sys.exit(1)
 
 load_dotenv()
@@ -110,8 +109,7 @@ async def main():
         logger.critical('Telegram credentials missing')
         return
 
-    client = TelegramClient(SESSION_NAME, int(
-        TELEGRAM_API_ID), TELEGRAM_API_HASH)
+    client = TelegramClient(SESSION_NAME, int(TELEGRAM_API_ID), TELEGRAM_API_HASH)
     await client.start()  # pyright: ignore[reportGeneralTypeIssues]
     logger.info('Telegram connected')
 
@@ -121,8 +119,7 @@ async def main():
 
     await notifier.started_bot()
 
-    asyncio.create_task(reconciliation_loop(
-        bridge, batcher, 300))  # Every 5 minutes
+    asyncio.create_task(reconciliation_loop(bridge, batcher, 300))  # Every 5 minutes
 
     resolved = []
     for ch in TARGET_CHANNELS:

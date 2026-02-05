@@ -1,4 +1,3 @@
-
 import os
 
 target_file = '/opt/trading_bot/core/dhan_bridge.py'
@@ -81,9 +80,9 @@ if start_index != -1:
         new_lines = lines[:start_index] + [new_method] + lines[end_index:]
         with open(target_file, 'w') as f:
             f.writelines(new_lines)
-        print("Successfully patched file.")
+        print('Successfully patched file.')
     else:
-        print("Could not find end of method.")
+        print('Could not find end of method.')
 
 else:
-    print("Could not find start of method.")
+    print('Could not find start of method.')

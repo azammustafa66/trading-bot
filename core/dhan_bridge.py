@@ -14,7 +14,6 @@ This module handles:
 
 from __future__ import annotations
 
-
 import asyncio
 import logging
 import math
@@ -899,7 +898,7 @@ class DhanBridge:
 
     def _get_current_price(self, sid: str, exch_seg: str, entry: float, has_depth: bool) -> float:
         """
-        Get current price. 
+        Get current price.
         Prioritizes WebSocket Depth feed. Falls back to 10-tick API polling if depth is unavailable.
         """
         # 1. Check Cache DIRECTLY (Avoid get_live_ltp implicit API call)
@@ -914,22 +913,24 @@ class DhanBridge:
                     [{'ExchangeSegment': 'NSE_FNO', 'SecurityId': sid}])
                 for _ in range(10):
                     time.sleep(0.05)
-                    curr_ltp = float(self.depth_cache.get(sid, {}).get('ltp', 0.0))
+                    curr_ltp = float(self.depth_cache.get(
+                        sid, {}).get('ltp', 0.0))
                     if curr_ltp > 0:
                         break
 
             # 3. API Fallback with 10-tick Polling (Strict Requirement)
             if curr_ltp == 0:
-                logger.info(f'Switching to API Polling (10 ticks) for {sid}...')
+                logger.info(
+                    f'Switching to API Polling (10 ticks) for {sid}...')
                 for i in range(10):
                     # This fetches AND updates the cache
                     ltp = self._fetch_ltp_from_api(sid, exch_seg)
                     if ltp > 0:
                         curr_ltp = ltp
-                        logger.info(f'Tick {i+1}/10: LTP {curr_ltp}')
+                        logger.info(f'Tick {i + 1}/10: LTP {curr_ltp}')
                     else:
-                        logger.warning(f'Tick {i+1}/10: LTP 0')
-                    
+                        logger.warning(f'Tick {i + 1}/10: LTP 0')
+
                     time.sleep(1)
 
         # Use signal entry as last resort
@@ -938,6 +939,7 @@ class DhanBridge:
             curr_ltp = entry
 
         return curr_ltp
+
     def _fetch_ltp_from_api(self, sid: str, exch_seg: str = '') -> float:
         """Fetch LTP via Dhan ticker API."""
         try:
@@ -996,7 +998,7 @@ class DhanBridge:
         if atr <= 0:
             trailing_jump = max(round(anchor * 0.05, 1), 1.0)
         else:
-            multiplier = 1.0 if is_positional else 0.5
+            multiplier = 1.0 if is_positional else 0.6
             min_jump = 2.0 if is_positional else 1.0
             trailing_jump = max(round(atr * multiplier, 1), min_jump)
 
