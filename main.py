@@ -20,9 +20,63 @@ try:
     from core.dhan_bridge import DhanBridge
     from core.notifier import Notifier
     from core.signal_batcher import SignalBatcher
+    from core.trap_monitor import TrapMonitor
 except ImportError as e:
     sys.stderr.write(f'Import Error: {e}. Ensure you are running from the root directory.\n')
     sys.exit(1)
+
+# ... (omitted)
+
+# --- MAIN --- #
+
+
+async def main():
+    if not TELEGRAM_API_ID or not TELEGRAM_API_HASH:
+        logger.critical('Telegram credentials missing')
+        return
+
+    client = TelegramClient(SESSION_NAME, int(TELEGRAM_API_ID), TELEGRAM_API_HASH)
+    await client.start()  # pyright: ignore[reportGeneralTypeIssues]
+    logger.info('Telegram connected')
+
+    notifier = Notifier(client, ADMIN_ID)
+    bridge = DhanBridge()
+    batcher = SignalBatcher(bridge, notifier)
+
+    # Initialize Writers Trap Monitor (Live Mode)
+    monitor = TrapMonitor(bridge, dry_run=False)
+    monitor.start()
+
+    await notifier.started_bot()
+
+    asyncio.create_task(reconciliation_loop(bridge, batcher, 300))  # Every 5 minutes
+
+    resolved = []
+    for ch in TARGET_CHANNELS:
+        try:
+            # If channel is a string but looks like an ID, convert it
+            if isinstance(ch, str) and ch.lstrip('-').isdigit():
+                ch = int(ch)
+
+            resolved.append(await client.get_entity(ch))
+        except (ValueError, TypeError) as e:
+            logger.error(f'Invalid channel ID {ch}: {e}')
+        except Exception as e:
+            # Catch-all for Telethon resolution errors
+            logger.error(f'Failed to resolve channel {ch}: {e}')
+
+    @client.on(events.NewMessage(chats=resolved))
+    async def handler(event):
+        if event.message and event.message.message:
+            await batcher.add_message(event.message.message, event.message.date, event.chat_id)
+
+    try:
+        # pyright: ignore[reportGeneralTypeIssues]
+        await client.run_until_disconnected()
+    finally:
+        logger.info('Main loop finished. Stopping monitor...')
+        monitor.stop()
+
 
 load_dotenv()
 
@@ -50,9 +104,7 @@ os.makedirs('data', exist_ok=True)
 
 # --- LOGGING --- #
 def setup_logging():
-    formatter = logging.Formatter(
-        '%(asctime)s [%(levelname)s] [%(name)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S'
-    )
+    formatter = logging.Formatter('%(asctime)s [%(levelname)s] [%(name)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
     file_handler = RotatingFileHandler(
         'logs/trade.log', maxBytes=MAX_LOG_SIZE, backupCount=LOG_BACKUP_COUNT, encoding='utf-8'
@@ -117,6 +169,10 @@ async def main():
     bridge = DhanBridge()
     batcher = SignalBatcher(bridge, notifier)
 
+    # Initialize Writers Trap Monitor (Live Mode)
+    monitor = TrapMonitor(bridge, dry_run=False)
+    monitor.start()
+
     await notifier.started_bot()
 
     asyncio.create_task(reconciliation_loop(bridge, batcher, 300))  # Every 5 minutes
@@ -140,8 +196,13 @@ async def main():
         if event.message and event.message.message:
             await batcher.add_message(event.message.message, event.message.date, event.chat_id)
 
-    # pyright: ignore[reportGeneralTypeIssues]
-    await client.run_until_disconnected()
+    try:
+        # pyright: ignore[reportGeneralTypeIssues]
+        await client.run_until_disconnected()
+    finally:
+        logger.info('Main loop finished. Stopping monitor...')
+        if 'monitor' in locals():
+            monitor.stop()
 
 
 if __name__ == '__main__':

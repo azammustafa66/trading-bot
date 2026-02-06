@@ -97,8 +97,7 @@ class DhanBridge:
         self.depth_updated = asyncio.Event()
         self.feed: Optional[DepthFeed] = None
         self.feed_loop = asyncio.new_event_loop()
-        self.feed_thread = threading.Thread(
-            target=self._run_feed_loop, daemon=True)
+        self.feed_thread = threading.Thread(target=self._run_feed_loop, daemon=True)
 
         self._initialize_session()
 
@@ -156,8 +155,7 @@ class DhanBridge:
         logger.info(f'Subscribing to {len(symbols)} symbols...')
 
         if self.feed_loop.is_running():
-            asyncio.run_coroutine_threadsafe(
-                self.feed.subscribe(symbols), self.feed_loop)
+            asyncio.run_coroutine_threadsafe(self.feed.subscribe(symbols), self.feed_loop)
         else:
             logger.error('Feed loop not running')
 
@@ -172,8 +170,7 @@ class DhanBridge:
             return
 
         payload = [{'ExchangeSegment': 'NSE_FNO', 'SecurityId': sid}]
-        asyncio.run_coroutine_threadsafe(
-            self.feed.unsubscribe(payload), self.feed_loop)
+        asyncio.run_coroutine_threadsafe(self.feed.unsubscribe(payload), self.feed_loop)
         self.depth_cache.pop(sid, None)
 
     # =========================================================================
@@ -193,13 +190,7 @@ class DhanBridge:
             now = time.monotonic()
 
             if sid not in self.depth_cache:
-                self.depth_cache[sid] = {
-                    'bid': [],
-                    'ask': [],
-                    'ltp': 0.0,
-                    'bid_ts': now,
-                    'ask_ts': now,
-                }
+                self.depth_cache[sid] = {'bid': [], 'ask': [], 'ltp': 0.0, 'bid_ts': now, 'ask_ts': now}
 
             self.depth_cache[sid][side] = levels
             self.depth_cache[sid][f'{side}_ts'] = now
@@ -208,8 +199,7 @@ class DhanBridge:
             bids = self.depth_cache[sid]['bid']
             asks = self.depth_cache[sid]['ask']
             if bids and asks:
-                self.depth_cache[sid]['ltp'] = (
-                    bids[0]['price'] + asks[0]['price']) / 2
+                self.depth_cache[sid]['ltp'] = (bids[0]['price'] + asks[0]['price']) / 2
 
             # Signal that depth has been updated (for event-driven monitors)
             self.depth_updated.set()
@@ -291,8 +281,7 @@ class DhanBridge:
             return 1.0
 
         # Anti-spoofing: discount orders that are >70% of total volume
-        buy_vol, sell_vol = self._apply_anti_spoofing(
-            bids, asks, buy_vol, sell_vol)
+        buy_vol, sell_vol = self._apply_anti_spoofing(bids, asks, buy_vol, sell_vol)
 
         if sell_vol <= 0:
             return 5.0
@@ -307,13 +296,10 @@ class DhanBridge:
         now = time.monotonic()
         last = self._imbalance_log_ts.get(security_id, 0)
         if now - last >= 10:
-            logger.warning(
-                f'⚠️ Stale data for {security_id}: lag {time_diff:.3f}s')
+            logger.warning(f'⚠️ Stale data for {security_id}: lag {time_diff:.3f}s')
             self._imbalance_log_ts[security_id] = now
 
-    def _apply_anti_spoofing(
-        self, bids: List[Dict], asks: List[Dict], buy_vol: int, sell_vol: int
-    ) -> Tuple[int, int]:
+    def _apply_anti_spoofing(self, bids: List[Dict], asks: List[Dict], buy_vol: int, sell_vol: int) -> Tuple[int, int]:
         """
         Cap outliers that are > 3x the average volume of the top 20 levels.
         This prevents massive fake walls from skewing the ratio, while still
@@ -341,17 +327,12 @@ class DhanBridge:
 
         return int(capped_buy_vol), int(capped_sell_vol)
 
-    def _log_imbalance(
-        self, security_id: str, imb: float, buy_vol: int, sell_vol: int, time_diff: float
-    ) -> None:
+    def _log_imbalance(self, security_id: str, imb: float, buy_vol: int, sell_vol: int, time_diff: float) -> None:
         """Log imbalance calculation (rate-limited to every 5s)."""
         now = time.monotonic()
         last = self._imbalance_log_ts.get(security_id, 0)
         if now - last >= 60:
-            logger.info(
-                f'⚖️ IMB {security_id} = {imb} | '
-                f'Buy={buy_vol} Sell={sell_vol} | Lag={time_diff:.4f}s'
-            )
+            logger.info(f'⚖️ IMB {security_id} = {imb} | Buy={buy_vol} Sell={sell_vol} | Lag={time_diff:.4f}s')
             self._imbalance_log_ts[security_id] = now
 
     def get_liquidity_sids(self, sym: str, option_sid: str) -> List[str]:
@@ -432,14 +413,11 @@ class DhanBridge:
         """
         new_positions = []
         try:
-            resp = self.session.get(
-                f'{self.base_url}/positions', timeout=5).json()
-            positions = resp if isinstance(
-                resp, list) else resp.get('data', [])
+            resp = self.session.get(f'{self.base_url}/positions', timeout=5).json()
+            positions = resp if isinstance(resp, list) else resp.get('data', [])
 
             # Build map of live positions with non-zero quantity
-            live_map = {str(p['securityId']): p for p in positions if int(
-                p.get('netQty', 0)) != 0}
+            live_map = {str(p['securityId']): p for p in positions if int(p.get('netQty', 0)) != 0}
             live_sids = set(live_map.keys())
 
             # 1. Clean up stale trades
@@ -502,8 +480,7 @@ class DhanBridge:
             return cached
 
         try:
-            data = self.session.get(
-                f'{self.base_url}/fundlimit', timeout=5).json()
+            data = self.session.get(f'{self.base_url}/fundlimit', timeout=5).json()
             funds = float(data.get('sodLimit', 0.0))
             self._funds_cache = (funds, now)
             logger.info(f'Funds available: ₹{funds:,.0f}')
@@ -544,8 +521,7 @@ class DhanBridge:
                 'toDate': to_date.strftime('%Y-%m-%d'),
             }
 
-            resp = self.session.post(
-                f'{self.base_url}/charts/intraday', json=payload, timeout=10)
+            resp = self.session.post(f'{self.base_url}/charts/intraday', json=payload, timeout=10)
             data = resp.json()
 
             highs = np.array(data.get('high', []), dtype=float)
@@ -556,8 +532,7 @@ class DhanBridge:
                 logger.warning(f'ATR: Insufficient data for {symbol}')
                 return self._atr_fallback(symbol)
 
-            atr_series = talib.ATR(highs, lows, closes,
-                                   timeperiod=self.ATR_PERIOD)
+            atr_series = talib.ATR(highs, lows, closes, timeperiod=self.ATR_PERIOD)
             atr_series = atr_series[:-1]  # Drop forming candle
 
             if len(atr_series) == 0 or np.isnan(atr_series[-1]):
@@ -628,16 +603,14 @@ class DhanBridge:
 
             try:
                 data = resp.json()
-                status = data.get('orderStatus', '') if isinstance(
-                    data, dict) else ''
+                status = data.get('orderStatus', '') if isinstance(data, dict) else ''
             except Exception:
                 status = ''
 
             if resp.status_code == 202 or status in ('CANCELLED', 'CLOSED', 'TRADED'):
                 logger.info(f'{leg} cancelled for order {order_id}')
             else:
-                logger.debug(
-                    f'Cancel ignored: {leg} | HTTP {resp.status_code}')
+                logger.debug(f'Cancel ignored: {leg} | HTTP {resp.status_code}')
 
         except requests.RequestException as e:
             logger.error(f'Cancel leg error [{order_id}/{leg}]: {e}')
@@ -660,10 +633,8 @@ class DhanBridge:
         try:
             # Attempt market exit up to 5 times
             for _ in range(5):
-                resp = self.session.get(
-                    f'{self.base_url}/positions', timeout=5).json()
-                positions = resp if isinstance(
-                    resp, list) else resp.get('data', [])
+                resp = self.session.get(f'{self.base_url}/positions', timeout=5).json()
+                positions = resp if isinstance(resp, list) else resp.get('data', [])
 
                 for p in positions:
                     if str(p.get('securityId')) == sid:
@@ -683,8 +654,7 @@ class DhanBridge:
                             'validity': 'DAY',
                         }
 
-                        self.session.post(
-                            f'{self.base_url}/orders', json=payload, timeout=3)
+                        self.session.post(f'{self.base_url}/orders', json=payload, timeout=3)
                         logger.critical(f'MARKET EXIT: {sid}')
                         time.sleep(1)
                         break
@@ -739,10 +709,8 @@ class DhanBridge:
 
         # Then exit all positions
         try:
-            resp = self.session.get(
-                f'{self.base_url}/positions', timeout=5).json()
-            positions = resp if isinstance(
-                resp, list) else resp.get('data', [])
+            resp = self.session.get(f'{self.base_url}/positions', timeout=5).json()
+            positions = resp if isinstance(resp, list) else resp.get('data', [])
 
             for p in positions:
                 sid = str(p.get('securityId'))
@@ -755,10 +723,8 @@ class DhanBridge:
     def _square_off_position_market(self, security_id: str) -> None:
         """Execute market order to close a position."""
         try:
-            resp = self.session.get(
-                f'{self.base_url}/positions', timeout=5).json()
-            positions = resp if isinstance(
-                resp, list) else resp.get('data', [])
+            resp = self.session.get(f'{self.base_url}/positions', timeout=5).json()
+            positions = resp if isinstance(resp, list) else resp.get('data', [])
 
             for p in positions:
                 if str(p['securityId']) == str(security_id):
@@ -826,8 +792,7 @@ class DhanBridge:
         is_positional = signal.get('is_positional', False)
 
         # Map symbol to security ID
-        sec_id, exch, lot, _ = self.mapper.get_security_id(
-            sym, entry, self.get_live_ltp)
+        sec_id, exch, lot, _ = self.mapper.get_security_id(sym, entry, self.get_live_ltp)
         if not sec_id:
             logger.error(f'Security ID not found: {sym}')
             return 0.0, 'ERROR'
@@ -850,8 +815,7 @@ class DhanBridge:
 
         try:
             # Get current price
-            curr_ltp = self._get_current_price(
-                sid_str, exch_seg, entry, has_depth)
+            curr_ltp = self._get_current_price(sid_str, exch_seg, entry, has_depth)
             if curr_ltp == 0:
                 return 0.0, 'ERROR'
 
@@ -859,8 +823,7 @@ class DhanBridge:
             anchor = entry if entry > 0 else curr_ltp
             atr = self.fetch_atr(sid_str, exch_seg, sym, is_positional)
 
-            price_status = self._check_price_conditions(
-                curr_ltp, entry, atr, anchor)
+            price_status = self._check_price_conditions(curr_ltp, entry, atr, anchor)
             if price_status:
                 return curr_ltp, price_status
 
@@ -909,19 +872,16 @@ class DhanBridge:
 
             # 2. Try WebSocket (Fastest - if available)
             if has_depth:
-                self.subscribe(
-                    [{'ExchangeSegment': 'NSE_FNO', 'SecurityId': sid}])
+                self.subscribe([{'ExchangeSegment': 'NSE_FNO', 'SecurityId': sid}])
                 for _ in range(10):
                     time.sleep(0.05)
-                    curr_ltp = float(self.depth_cache.get(
-                        sid, {}).get('ltp', 0.0))
+                    curr_ltp = float(self.depth_cache.get(sid, {}).get('ltp', 0.0))
                     if curr_ltp > 0:
                         break
 
             # 3. API Fallback with 10-tick Polling (Strict Requirement)
             if curr_ltp == 0:
-                logger.info(
-                    f'Switching to API Polling (10 ticks) for {sid}...')
+                logger.info(f'Switching to API Polling (10 ticks) for {sid}...')
                 for i in range(10):
                     # This fetches AND updates the cache
                     ltp = self._fetch_ltp_from_api(sid, exch_seg)
@@ -956,29 +916,118 @@ class DhanBridge:
                 if ltp > 0:
                     # Cache the value
                     if sid not in self.depth_cache:
-                        self.depth_cache[sid] = {
-                            'bid': [],
-                            'ask': [],
-                            'ltp': 0.0,
-                            'bid_ts': 0,
-                            'ask_ts': 0,
-                        }
+                        self.depth_cache[sid] = {'bid': [], 'ask': [], 'ltp': 0.0, 'bid_ts': 0, 'ask_ts': 0}
                     self.depth_cache[sid]['ltp'] = ltp
                     logger.info(f'API price: {ltp}')
                 return ltp
         except Exception as e:
             logger.error(f'API fetch failed: {e}')
+        except Exception as e:
+            logger.error(f'API fetch failed: {e}')
         return 0.0
 
-    def _check_price_conditions(
-        self, curr_ltp: float, entry: float, atr: float, anchor: float
-    ) -> Optional[str]:
+    def fetch_option_chain(self, underlying_scrip: int, underlying_seg: str, expiry: str) -> Dict[str, Any]:
+        """
+        Fetch Option Chain for an underlying.
+
+        Args:
+            underlying_scrip: Security ID of the underlying (e.g., 13 for NIFTY).
+            underlying_seg: Segment of the underlying (e.g., 'IDX_I' or 'NSE_EQ').
+            expiry: Expiry date string (YYYY-MM-DD).
+
+        Returns:
+            Dictionary containing 'last_price' and 'oc' (option chain data).
+            Returns empty dict on failure.
+        """
+        try:
+            url = f'{self.base_url}/optionchain'
+            if underlying_seg == 'NSE_EQ':
+                req_seg = 'NSE_FNO'
+            else:
+                req_seg = underlying_seg
+
+            payload = {'UnderlyingScrip': int(underlying_scrip), 'UnderlyingSeg': req_seg, 'Expiry': expiry}
+
+            # Rate limit compliance (1 request per 3s)
+            # We don't enforce sleep here to allow caller control, but we log it.
+            logger.info(f'⛓️ Fetching Option Chain: Scrip {underlying_scrip} ({expiry})')
+
+            resp = self.session.post(url, json=payload, timeout=5).json()
+
+            if resp.get('status') == 'success' and 'data' in resp:
+                return resp['data']
+            else:
+                logger.error(f'Option Chain Fetch Failed: {resp.get("remarks", "Unknown Error")}')
+                return {}
+
+        except Exception as e:
+            logger.error(f'Option Chain Request Error: {e}')
+            return {}
+
+        except Exception as e:
+            logger.error(f'Option Chain Request Error: {e}')
+            return {}
+
+    def fetch_expiry_list(self, underlying_scrip: int, underlying_seg: str) -> List[str]:
+        """
+        Fetch valid expiry dates for an underlying.
+
+        Args:
+            underlying_scrip: Security ID.
+            underlying_seg: Segment.
+
+        Returns:
+            List of expiry dates (YYYY-MM-DD).
+        """
+        try:
+            url = f'{self.base_url}/optionchain/expirylist'
+
+            # API expects NSE_FNO for stock derivatives, even if underlying is NSE_EQ
+            if underlying_seg == 'NSE_EQ':
+                req_seg = 'NSE_FNO'
+            else:
+                req_seg = underlying_seg
+
+            payload = {'UnderlyingScrip': int(underlying_scrip), 'UnderlyingSeg': req_seg}
+
+            resp = self.session.post(url, json=payload, timeout=5).json()
+
+            if resp.get('status') == 'success' and 'data' in resp:
+                # Filter out past dates if any? API usually returns future.
+                return resp['data']
+            else:
+                logger.warning(f'Expiry Fetch Failed for {underlying_scrip} ({underlying_seg}): {resp}')
+                return []
+        except Exception as e:
+            logger.error(f'Expiry List Fetch Failed: {e}')
+            return []
+
+    def get_positions(self) -> List[Dict[str, Any]]:
+        """
+        Fetch all open positions from Dhan.
+
+        Returns:
+            List of position dictionaries.
+        """
+        try:
+            url = f'{self.base_url}/positions'
+            resp = self.session.get(url, timeout=5).json()
+
+            if resp.get('status') == 'success':
+                return resp.get('data', [])
+            else:
+                logger.error(f'Fetch Positions Failed: {resp.get("remarks")}')
+                return []
+        except Exception as e:
+            logger.error(f'Positions Request Error: {e}')
+            return []
+
+    def _check_price_conditions(self, curr_ltp: float, entry: float, atr: float, anchor: float) -> Optional[str]:
         """Check if price conditions allow order execution."""
         if not entry:
             return None
 
-        entry_limit = anchor + \
-            min(atr * 1.5, anchor * 0.15) if atr > 0 else anchor * 1.10
+        entry_limit = anchor + min(atr * 1.5, anchor * 0.15) if atr > 0 else anchor * 1.10
 
         if curr_ltp > entry_limit:
             logger.warning(f'Price too high: {curr_ltp} > {entry_limit:.2f}')
@@ -1003,15 +1052,22 @@ class DhanBridge:
             trailing_jump = max(round(atr * multiplier, 1), min_jump)
 
         # Stop loss
-        if parsed_sl > 0 and parsed_sl < anchor:
+        if parsed_sl > 0:
             final_sl = parsed_sl
+            source = 'SIGNAL'
+            if final_sl >= anchor:
+                logger.warning(f'⚠️ Signal SL {final_sl} >= Anchor {anchor}. Risk logic compromised.')
         elif atr > 0:
-            multiplier = 1.75 if is_positional else 1.2  # Tightened from 1.5
-            final_sl = anchor - (atr * multiplier)
+            multiplier = 1.0 if is_positional else 0.6
+            final_sl = round(anchor - (atr * multiplier), 2)
+            source = f'ATR (x{multiplier})'
         else:
-            # Fallback pct: Tightened Intraday from 0.90 (10%) to 0.94 (6%)
+            # Fallback pct
             fallback_pct = 0.85 if is_positional else 0.94
-            final_sl = anchor * fallback_pct
+            final_sl = round(anchor * fallback_pct, 2)
+            source = f'PCT ({fallback_pct})'
+
+        logger.info(f'🛑 Stop Loss Config: {source} | SL: {final_sl} | Anchor: {anchor} | T-Jump: {trailing_jump}')
 
         # Target
         final_target = anchor * 10.0
@@ -1019,13 +1075,34 @@ class DhanBridge:
         return final_sl, final_target, trailing_jump
 
     def _calculate_quantity(self, anchor: float, final_sl: float, lot: int, sid: str) -> int:
-        """Calculate position size based on risk."""
-        risk_per_share = max(anchor - final_sl, 1.0)
+        """Calculate position size based on risk and margin limits."""
+        # 1. Risk-based sizing
+        risk_per_share = max(anchor - final_sl, 0.05)  # Prevent div/0
         risk_amount = self.get_funds() * self.RISK_PER_TRADE_INTRA
-        qty = math.floor(math.floor(risk_amount / risk_per_share) / lot) * lot
+        qty_risk = math.floor(math.floor(risk_amount / risk_per_share) / lot) * lot
+
+        # 2. Margin-based checking (Max 5x leverage approx)
+        if anchor > 0:
+            max_margin_qty = (self.get_funds() * 4.0) / anchor  # Conservative 4x
+            qty_margin = math.floor(max_margin_qty / lot) * lot
+
+            if qty_risk > qty_margin:
+                logger.info(f'⚠️ Quantity Clamped by Margin: {qty_risk} -> {qty_margin} (Risk vs Funds)')
+                qty_risk = qty_margin
+
+        qty = int(qty_risk)
 
         if qty <= 0:
             qty = lot
+            logger.warning(f'⚠️ Min Qty Forced: 1 Lot ({lot}). Risk may exceed 1.25%.')
+
+        # Log the math for verification
+        actual_risk = qty * risk_per_share
+        cap_pct = (actual_risk / self.get_funds()) * 100 if self.get_funds() > 0 else 0
+        logger.info(
+            f'📐 Sizing: Fund={self.get_funds():.0f} | Risk/Share={risk_per_share:.2f} | '
+            f'Qty={qty} ({qty // lot} lots) | Risk={actual_risk:.0f} ({cap_pct:.2f}%)'
+        )
 
         return qty
 
@@ -1059,8 +1136,7 @@ class DhanBridge:
         self, payload: Dict[str, Any], signal: Dict[str, Any], sid: str, sym: str
     ) -> Tuple[float, str]:
         """Send super order to Dhan API."""
-        resp = self.session.post(
-            f'{self.base_url}/super/orders', json=payload, timeout=5)
+        resp = self.session.post(f'{self.base_url}/super/orders', json=payload, timeout=5)
 
         if resp.status_code not in (200, 201):
             logger.error(f'API error: {resp.text}')

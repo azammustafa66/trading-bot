@@ -82,11 +82,7 @@ def fetch_pnl() -> dict:
         return pnl_cache
 
     try:
-        headers = {
-            'access-token': DHAN_ACCESS_TOKEN,
-            'client-id': DHAN_CLIENT_ID,
-            'Content-Type': 'application/json',
-        }
+        headers = {'access-token': DHAN_ACCESS_TOKEN, 'client-id': DHAN_CLIENT_ID, 'Content-Type': 'application/json'}
 
         resp = requests.get(f'{DHAN_BASE_URL}/positions', headers=headers, timeout=10)
         # print(f"DEBUG: PnL Fetch Status: {resp.status_code}")
@@ -176,14 +172,10 @@ async def login(request: Request):
         jwt_token = create_jwt_token(phone)
         response = RedirectResponse('/feed', status_code=302)
         # Cookie expires when JWT expires (6 hours)
-        response.set_cookie(
-            'token', jwt_token, httponly=True, max_age=JWT_EXPIRY_HOURS * 3600, samesite='lax'
-        )
+        response.set_cookie('token', jwt_token, httponly=True, max_age=JWT_EXPIRY_HOURS * 3600, samesite='lax')
         return response
 
-    return HTMLResponse(
-        LOGIN_PAGE.replace('<!-- ERROR -->', '<p class="error">Phone not authorized</p>')
-    )
+    return HTMLResponse(LOGIN_PAGE.replace('<!-- ERROR -->', '<p class="error">Phone not authorized</p>'))
 
 
 @app.get('/logout')

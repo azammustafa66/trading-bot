@@ -19,7 +19,4 @@ with TelegramClient(session_name, int(api_id), api_hash) as client:
             print(f'Name: {dialog.name}')
             print(f'ID:   {dialog.id}')
             print('-' * 20)
-    print(
-        '\nCopy the ID of the channel you want to listen to and paste it '
-        'into TARGET_CHANNEL_ID in .env'
-    )
+    print('\nCopy the ID of the channel you want to listen to and paste it into TARGET_CHANNEL_ID in .env')

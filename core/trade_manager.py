@@ -72,11 +72,7 @@ class TradeManager:
         os.replace(tmp_path, self.file_path)
 
     def add_trade(
-        self,
-        signal: Dict[str, Any],
-        order_data: Dict[str, Any],
-        sec_id: str,
-        fut_sid: Optional[str] = None,
+        self, signal: Dict[str, Any], order_data: Dict[str, Any], sec_id: str, fut_sid: Optional[str] = None
     ) -> None:
         """
         Register a new executed trade.
@@ -94,9 +90,7 @@ class TradeManager:
             'security_id': str(sec_id),
             'order_id': order_data.get('orderId'),
             'entry_price': (
-                order_data.get('averagePrice')
-                or order_data.get('tradedPrice')
-                or signal.get('trigger_above', 0.0)
+                order_data.get('averagePrice') or order_data.get('tradedPrice') or signal.get('trigger_above', 0.0)
             ),
             'is_call': 'CE' in symbol or 'CALL' in symbol,
             'is_put': 'PE' in symbol or 'PUT' in symbol,

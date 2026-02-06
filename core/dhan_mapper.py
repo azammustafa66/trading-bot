@@ -60,9 +60,7 @@ class DhanMapper:
     COL_TICK_SIZE = 'SEM_TICK_SIZE'
 
     # Month abbreviations for symbol parsing
-    _MONTHS = frozenset(
-        {'JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'}
-    )
+    _MONTHS = frozenset({'JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'})
 
     def __init__(self) -> None:
         """Initialize the mapper and load the master CSV."""
@@ -132,9 +130,7 @@ class DhanMapper:
             or None if not found or not an option.
         """
         try:
-            row = self.df.filter(pl.col(self.COL_SECURITY_ID) == str(security_id)).select(
-                self.COL_INSTRUMENT_NAME
-            )
+            row = self.df.filter(pl.col(self.COL_SECURITY_ID) == str(security_id)).select(self.COL_INSTRUMENT_NAME)
 
             if row.is_empty():
                 return None
@@ -157,9 +153,7 @@ class DhanMapper:
             Exchange segment string (e.g., 'NSE_FNO', 'BSE_FNO') or None.
         """
         try:
-            row = self.df.filter(pl.col(self.COL_SECURITY_ID) == str(security_id)).select(
-                self.COL_EXCHANGE_ID
-            )
+            row = self.df.filter(pl.col(self.COL_SECURITY_ID) == str(security_id)).select(self.COL_EXCHANGE_ID)
 
             if row.is_empty():
                 return None
@@ -183,10 +177,7 @@ class DhanMapper:
             return None
 
     def get_security_id(
-        self,
-        trading_symbol: str,
-        price_ref: float = 0.0,
-        ltp_fetcher: Optional[Callable[[str], float]] = None,
+        self, trading_symbol: str, price_ref: float = 0.0, ltp_fetcher: Optional[Callable[[str], float]] = None
     ) -> Tuple[Optional[SecurityId], Optional[ExchangeId], LotSize, TickSize]:
         """
         Map a trading symbol to its Dhan security ID.
@@ -244,13 +235,9 @@ class DhanMapper:
             0.0,
         )
 
-    def _find_exact_match(
-        self, symbol: str, today: date
-    ) -> Optional[Tuple[SecurityId, ExchangeId, LotSize, TickSize]]:
+    def _find_exact_match(self, symbol: str, today: date) -> Optional[Tuple[SecurityId, ExchangeId, LotSize, TickSize]]:
         """Find an exact match for the trading symbol."""
-        result = self.df.filter(
-            (pl.col(self.COL_CUSTOM_SYMBOL) == symbol) & (pl.col(self.COL_EXPIRY_DATE) >= today)
-        )
+        result = self.df.filter((pl.col(self.COL_CUSTOM_SYMBOL) == symbol) & (pl.col(self.COL_EXPIRY_DATE) >= today))
 
         if result.is_empty():
             return None
@@ -294,18 +281,11 @@ class DhanMapper:
             logger.warning(f'❌ Failed to parse: {symbol}')
             return None
 
-        logger.info(
-            f'🧩 Parsed: {underlying} | Strike: {strike} | Type: {opt_type} | Month: {target_month}'
-        )
+        logger.info(f'🧩 Parsed: {underlying} | Strike: {strike} | Type: {opt_type} | Month: {target_month}')
         return underlying, strike, opt_type, target_month  # type: ignore
 
     def _find_candidates(
-        self,
-        underlying: str,
-        strike: float,
-        opt_type: str,
-        today: date,
-        target_month: Optional[str] = None,
+        self, underlying: str, strike: float, opt_type: str, today: date, target_month: Optional[str] = None
     ) -> pl.DataFrame:
         """Find all option contracts matching the criteria."""
         candidates = self.df.filter(
@@ -339,10 +319,7 @@ class DhanMapper:
         return candidates.sort(self.COL_EXPIRY_DATE)
 
     def _select_best_candidate(
-        self,
-        candidates: pl.DataFrame,
-        price_ref: float,
-        ltp_fetcher: Optional[Callable[[str], float]],
+        self, candidates: pl.DataFrame, price_ref: float, ltp_fetcher: Optional[Callable[[str], float]]
     ) -> dict:
         """
         Select the best candidate from multiple matches.
@@ -392,8 +369,7 @@ class DhanMapper:
                 live_price = 0.0
 
             logger.info(
-                f'   ⚖️ Candidate {i + 1}: Expiry {row[self.COL_EXPIRY_DATE]} | '
-                f'Live: {live_price} vs Ref: {price_ref}'
+                f'   ⚖️ Candidate {i + 1}: Expiry {row[self.COL_EXPIRY_DATE]} | Live: {live_price} vs Ref: {price_ref}'
             )
 
             if live_price > 0:
@@ -445,32 +421,24 @@ class DhanMapper:
                 return None, 0.0
 
             # Try to find exact month match
-            candidate = self._find_target_month_future(
-                futures, target_expiry.month, target_expiry.year
-            )
+            candidate = self._find_target_month_future(futures, target_expiry.month, target_expiry.year)
 
             # Fallback to nearest available future
             if not candidate:
                 candidate = self._find_nearest_future(futures, get_today())
 
             if candidate:
-                return (
-                    str(candidate[self.COL_SECURITY_ID]),
-                    float(candidate[self.COL_TICK_SIZE] or 0.05),
-                )
+                return (str(candidate[self.COL_SECURITY_ID]), float(candidate[self.COL_TICK_SIZE] or 0.05))
 
         except Exception as e:
             logger.error(f'Future lookup failed: {e}')
 
         return None, 0.0
 
-    def _find_target_month_future(
-        self, futures: pl.DataFrame, month: int, year: int
-    ) -> Optional[dict]:
+    def _find_target_month_future(self, futures: pl.DataFrame, month: int, year: int) -> Optional[dict]:
         """Find future expiring in the target month."""
         result = futures.filter(
-            (pl.col(self.COL_EXPIRY_DATE).dt.month() == month)
-            & (pl.col(self.COL_EXPIRY_DATE).dt.year() == year)
+            (pl.col(self.COL_EXPIRY_DATE).dt.month() == month) & (pl.col(self.COL_EXPIRY_DATE).dt.year() == year)
         )
 
         if result.is_empty():

@@ -89,9 +89,7 @@ RE_STOCK_NAME = re.compile(
     r'\b(?:(?:BUY|SELL)\s*)?([A-Z0-9\s&\-]+?)(?:\s*\d+\s+(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC))?\s+(\d+(?:\.\d+)?)\s*(CE|PE|CALL|PUT)\b',
     re.I,
 )
-RE_DATE = re.compile(
-    r'\b(\d{1,2})(?:st|nd|rd|th)?\s*(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\b', re.I
-)
+RE_DATE = re.compile(r'\b(\d{1,2})(?:st|nd|rd|th)?\s*(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\b', re.I)
 RE_STRIKE = re.compile(r'\b(\d+(?:\.\d+)?)\s*(CE|PE|CALL|PUT)\b', re.I)
 RE_TRIGGER = re.compile(r'\b(?:ABOVE|AT|CMP|RANGE)\s+([\d.\-\s]+)', re.I)
 RE_SL = re.compile(r'\b(?:SL|STOP\s*LOSS)\s*[:\-]?\s*([\d.\-\s]+)', re.I)
@@ -206,20 +204,7 @@ def detect_underlying(text: str) -> Optional[str]:
         raw_name = match.group(1)
         # Fix: Regex greedily captures month (e.g. VOLTAS FEB -> VOLTASFEB)
         # Remove any month names from the end of the detected name
-        for m in [
-            'JAN',
-            'FEB',
-            'MAR',
-            'APR',
-            'MAY',
-            'JUN',
-            'JUL',
-            'AUG',
-            'SEP',
-            'OCT',
-            'NOV',
-            'DEC',
-        ]:
+        for m in ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']:
             if raw_name.endswith(f' {m}'):
                 raw_name = raw_name[: -len(m) - 1]
             elif raw_name.endswith(m):  # merged
@@ -341,14 +326,10 @@ def parse_single_block(text: str, ref_date: Optional[date] = None) -> Dict[str, 
             from utils.generate_expiry_dates import select_expiry_label
 
             ref = ref_date or date.today()
-            expiry_label = select_expiry_label(
-                result['underlying'], datetime.combine(ref, time(9, 15))
-            )
+            expiry_label = select_expiry_label(result['underlying'], datetime.combine(ref, time(9, 15)))
 
         result['expiry_label'] = expiry_label
-        result['trading_symbol'] = (
-            f'{result["underlying"]} {expiry_label} {result["strike"]} {result["option_type"]}'
-        )
+        result['trading_symbol'] = f'{result["underlying"]} {expiry_label} {result["strike"]} {result["option_type"]}'
 
     except (ValueError, IndexError, AttributeError) as e:
         logger.warning(f'Symbol generation failed: {e}')
@@ -363,10 +344,7 @@ def parse_single_block(text: str, ref_date: Optional[date] = None) -> Dict[str, 
 
 
 def process_and_save(
-    messages: List[str],
-    dates: List[datetime],
-    jsonl_path: str = SIGNALS_JSONL,
-    json_path: str = SIGNALS_JSON,
+    messages: List[str], dates: List[datetime], jsonl_path: str = SIGNALS_JSONL, json_path: str = SIGNALS_JSON
 ) -> List[Dict[str, Any]]:
     """
     Process a batch of Telegram messages into trading signals.
@@ -465,9 +443,7 @@ def _load_existing_signals(jsonl_path: str) -> Dict[tuple, Dict[str, Any]]:
     return existing
 
 
-def _filter_duplicates(
-    parsed: List[Dict[str, Any]], existing: Dict[tuple, Dict[str, Any]]
-) -> List[Dict[str, Any]]:
+def _filter_duplicates(parsed: List[Dict[str, Any]], existing: Dict[tuple, Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Filter out duplicate signals within dedupe window."""
     new_signals = []
 
@@ -494,10 +470,7 @@ def _filter_duplicates(
 
 
 def _save_signals(
-    new_signals: List[Dict[str, Any]],
-    all_signals: Dict[tuple, Dict[str, Any]],
-    jsonl_path: str,
-    json_path: str,
+    new_signals: List[Dict[str, Any]], all_signals: Dict[tuple, Dict[str, Any]], jsonl_path: str, json_path: str
 ) -> None:
     """Persist signals to disk."""
     # Append to JSONL
@@ -539,9 +512,7 @@ if __name__ == '__main__':
     ]
 
     test_dates = [mock_now for _ in test_stream]
-    results = process_and_save(
-        test_stream, test_dates, jsonl_path='test_signals.jsonl', json_path='test_signals.json'
-    )
+    results = process_and_save(test_stream, test_dates, jsonl_path='test_signals.jsonl', json_path='test_signals.json')
 
     print(f'\nProcessed {len(results)} signals.\n')
     print(f'{"SYMBOL":<35} | {"ACTION":<5} | {"TRIG":<5} | {"SL":<5} | TARGET')

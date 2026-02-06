@@ -187,11 +187,7 @@ class DepthFeed:
             logger.info(f'Queued {len(instruments)} unsubscriptions')
             return
 
-        payload = {
-            'RequestCode': REQ_UNSUBSCRIBE,
-            'InstrumentCount': len(instruments),
-            'InstrumentList': instruments,
-        }
+        payload = {'RequestCode': REQ_UNSUBSCRIBE, 'InstrumentCount': len(instruments), 'InstrumentList': instruments}
 
         try:
             await self._ws.send(json.dumps(payload))
@@ -225,11 +221,7 @@ class DepthFeed:
 
         for i in range(0, len(instruments), self.SUBSCRIPTION_CHUNK_SIZE):
             chunk = instruments[i : i + self.SUBSCRIPTION_CHUNK_SIZE]
-            payload = {
-                'RequestCode': REQ_SUBSCRIBE,
-                'InstrumentCount': len(chunk),
-                'InstrumentList': chunk,
-            }
+            payload = {'RequestCode': REQ_SUBSCRIBE, 'InstrumentCount': len(chunk), 'InstrumentList': chunk}
 
             try:
                 await self._ws.send(json.dumps(payload))
@@ -249,9 +241,7 @@ class DepthFeed:
 
         while offset + HEADER_SIZE <= total_len:
             try:
-                msg_len, feed_code, exch_seg, sec_id, _ = struct.unpack_from(
-                    HEADER_FMT, data, offset
-                )
+                msg_len, feed_code, exch_seg, sec_id, _ = struct.unpack_from(HEADER_FMT, data, offset)
 
                 end = offset + msg_len
                 if end > total_len:

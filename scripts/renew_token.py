@@ -28,9 +28,7 @@ def setup_logging():
     logger = logging.getLogger('TokenRenewal')
     logger.setLevel(logging.INFO)
 
-    formatter = logging.Formatter(
-        '%(asctime)s [%(levelname)s] [%(name)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S'
-    )
+    formatter = logging.Formatter('%(asctime)s [%(levelname)s] [%(name)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
     # File Handler
     os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)

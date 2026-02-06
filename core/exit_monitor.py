@@ -75,12 +75,8 @@ class ExitMonitor:
         trigger_price = float(signal_details.get('trigger_above') or 0)
 
         if trigger_price > 0 and entry_price > 0 and entry_price < trigger_price:
-            logger.warning(
-                f'⚠️ WICK DETECTED: {sym} entry={entry_price:.2f} < trigger={trigger_price:.2f}'
-            )
-            await self.notifier.squared_off(
-                sym, f'Wick entry (avg {entry_price:.2f} < {trigger_price:.2f})'
-            )
+            logger.warning(f'⚠️ WICK DETECTED: {sym} entry={entry_price:.2f} < trigger={trigger_price:.2f}')
+            await self.notifier.squared_off(sym, f'Wick entry (avg {entry_price:.2f} < {trigger_price:.2f})')
             self.bridge.square_off_single(sid)
             self.active_monitors.discard(sym)
             return
@@ -92,12 +88,8 @@ class ExitMonitor:
                 await asyncio.sleep(2)
                 ltp = self.bridge.get_live_ltp(sid)
                 if ltp > 0 and ltp < trigger_price * 0.995:  # Allow 0.5% tolerance
-                    logger.warning(
-                        f'⚠️ WICK EXIT: {sym} price={ltp:.2f} fell below trigger={trigger_price:.2f}'
-                    )
-                    await self.notifier.squared_off(
-                        sym, f'Wick (price {ltp:.2f} < {trigger_price:.2f})'
-                    )
+                    logger.warning(f'⚠️ WICK EXIT: {sym} price={ltp:.2f} fell below trigger={trigger_price:.2f}')
+                    await self.notifier.squared_off(sym, f'Wick (price {ltp:.2f} < {trigger_price:.2f})')
                     self.bridge.square_off_single(sid)
                     self.active_monitors.discard(sym)
                     return
@@ -116,10 +108,7 @@ class ExitMonitor:
         if new_subs:
             self.bridge.subscribe(new_subs)
 
-        logger.info(
-            f'🎯 Exit Monitor Started: {sym} ({direction}) | '
-            f'Thresholds: bad<{bad_imb}, good>={good_imb}'
-        )
+        logger.info(f'🎯 Exit Monitor Started: {sym} ({direction}) | Thresholds: bad<{bad_imb}, good>={good_imb}')
 
         last_log_time = 0
 

@@ -140,9 +140,7 @@ class SignalBatcher:
         await asyncio.sleep(BATCH_DELAY_SECONDS)
 
         try:
-            signals = process_and_save(
-                self.batch_msgs, self.batch_dates, SIGNALS_JSONL, SIGNALS_JSON
-            )
+            signals = process_and_save(self.batch_msgs, self.batch_dates, SIGNALS_JSONL, SIGNALS_JSON)
         except Exception as e:
             logger.error(f'Parser error: {e}')
             signals = []
@@ -167,9 +165,7 @@ class SignalBatcher:
                 # 2. Success Case
                 if status == 'SUCCESS':
                     await self.notifier.order_placed(sym, 0, ltp)
-                    sid, _, _, _ = self.bridge.mapper.get_security_id(
-                        sym, ltp, self.bridge.get_live_ltp
-                    )
+                    sid, _, _, _ = self.bridge.mapper.get_security_id(sym, ltp, self.bridge.get_live_ltp)
                     if sid:
                         self.active_monitors.add(sym)
                         loop.create_task(self._start_exit_monitor(sym, str(sid)))
@@ -202,9 +198,7 @@ class SignalBatcher:
 
     async def _start_retry_monitor(self, sig: Dict[str, Any]):
         """Create and run a retry monitor for a pending signal."""
-        monitor = RetryMonitor(
-            bridge=self.bridge, trade_manager=self.tm, active_monitors=self.active_monitors
-        )
+        monitor = RetryMonitor(bridge=self.bridge, trade_manager=self.tm, active_monitors=self.active_monitors)
 
         async def on_success(sym: str, sid: str):
             asyncio.get_running_loop().create_task(self._start_exit_monitor(sym, sid))
