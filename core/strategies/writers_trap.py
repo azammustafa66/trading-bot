@@ -42,6 +42,9 @@ class WritersTrapStrategy:
         calls = []
         puts = []
 
+        total_ce_change = 0
+        total_pe_change = 0
+
         for strike_str, data in chain_data.items():
             try:
                 strike = float(strike_str)
@@ -49,10 +52,16 @@ class WritersTrapStrategy:
                 # Calls
                 if 'ce' in data:
                     ce = data['ce']
+                    oi = ce.get('oi', 0)
+                    prev_oi = ce.get('previous_oi', 0)
+                    change = oi - prev_oi
+                    total_ce_change += change
+                    
                     calls.append(
                         {
                             'strike': strike,
-                            'oi': ce.get('oi', 0),
+                            'oi': oi,
+                            'oi_change': change,
                             'ltp': ce.get('last_price', 0),
                             'sid': ce.get('security_id'),
                         }
@@ -61,16 +70,28 @@ class WritersTrapStrategy:
                 # Puts
                 if 'pe' in data:
                     pe = data['pe']
+                    oi = pe.get('oi', 0)
+                    prev_oi = pe.get('previous_oi', 0)
+                    change = oi - prev_oi
+                    total_pe_change += change
+                    
                     puts.append(
                         {
                             'strike': strike,
-                            'oi': pe.get('oi', 0),
+                            'oi': oi,
+                            'oi_change': change,
                             'ltp': pe.get('last_price', 0),
                             'sid': pe.get('security_id'),
                         }
                     )
             except ValueError:
                 continue
+        
+        # Calculate Global Sentiment (Positive = Bullish, Negative = Bearish)
+        # Bullish if Puts are adding (Support) and/or Calls are leaving (Resistance weak)
+        # Bearish if Calls are adding (Resistance) and/or Puts are leaving (Support weak)
+        sentiment_score = total_pe_change - total_ce_change
+        logger.info(f'📊 Global Sentiment [{symbol}]: {sentiment_score} (PE Δ {total_pe_change} - CE Δ {total_ce_change})')
 
         # 2. Sort by OI (Descending)
         top_calls = sorted(calls, key=lambda x: x['oi'], reverse=True)[:top_n]
@@ -101,6 +122,8 @@ class WritersTrapStrategy:
                         'sid': c['sid'],
                         'spot': spot_price,
                         'oi': c['oi'],
+                        'oi_change': c['oi_change'],
+                        'sentiment': sentiment_score,
                         'diff': spot_price - strike,
                     }
                 )
@@ -123,6 +146,8 @@ class WritersTrapStrategy:
                         'sid': p['sid'],
                         'spot': spot_price,
                         'oi': p['oi'],
+                        'oi_change': p['oi_change'],
+                        'sentiment': sentiment_score,
                         'diff': strike - spot_price,
                     }
                 )

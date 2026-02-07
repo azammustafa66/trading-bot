@@ -514,9 +514,10 @@ class TrapMonitor:
                 symbol_parts = trap['symbol'].split()
                 underlying = symbol_parts[0] if symbol_parts else ''
                 trap_type = 'PUT' if trap.get('type') == 'PUT_TRAP' else 'CALL'
-                day_high = trap.get('spot', 0)  # Use spot as reference
+                day_high = trap.get('spot', 0)
+                sentiment = trap.get('sentiment', 0)
 
-                self.positional_scanner.register_trap_signal(underlying, trap_type, day_high)
+                self.positional_scanner.register_trap_signal(underlying, trap_type, day_high, sentiment)
             except Exception as e:
                 logger.error(f'Failed to register trap with PositionalScanner: {e}')
 

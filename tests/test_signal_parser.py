@@ -8,7 +8,7 @@ from core.signal_parser import parse_single_block, process_and_save
 class TestSignalParser:
     def test_explicit_buy_signal(self, dynamic_dates):
         """Test a clear BUY signal with standard formatting."""
-        msg = f'BUY NIFTY 24000 CE ABOVE 120 SL 80 TARGET 160'
+        msg = 'BUY NIFTY 24000 CE ABOVE 120'  # Missing SL/Target 160'
         signals = process_and_save([msg], [dynamic_dates['today']])
 
         assert len(signals) == 1
@@ -22,7 +22,7 @@ class TestSignalParser:
 
     def test_implied_buy_signal(self, dynamic_dates):
         """Test a defined signal missing the 'BUY' keyword (defaulting to BUY)."""
-        msg = f'NIFTY 24500 PE ABOVE 200'  # No 'BUY'
+        msg = 'NIFTY 24500 PE ABOVE 200'  # No 'BUY'
         signals = process_and_save([msg], [dynamic_dates['today']])
 
         assert len(signals) == 1

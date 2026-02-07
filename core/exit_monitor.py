@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, Set
+
+import polars as pl
 
 if TYPE_CHECKING:
     from core.dhan_bridge import DhanBridge
@@ -97,7 +100,6 @@ class ExitMonitor:
 
         liquidity_sids = self.bridge.get_liquidity_sids(sym, sid)
         new_subs = []
-        new_subs = []
         for liq_sid in liquidity_sids:
             if liq_sid not in self._subscribed_sids:
                 # Dynamic segment resolution
@@ -144,51 +146,245 @@ class ExitMonitor:
                 # - CALL: We want buyers (high imb = good). Use raw imbalance.
                 # - PUT: We want sellers (low imb = good). Invert: effective_imb = 1/raw_imb
                 if is_put:
-                    effective_imb = round(1.0 / raw_imb, 2) if raw_imb > 0 else 0.0
+                    effective_imb = round(1.0 / raw_imb, 2) if raw_imb > 0.001 else 0.0
                 else:
                     effective_imb = raw_imb
 
                 now = asyncio.get_event_loop().time()
+                
+                # --- Dynamic OI Target Update (Every 60s) ---
                 if now - last_log_time >= 60:
+                    await self._update_dynamic_target(sid, sym, direction)
                     last_log_time = now
-                    oi_info = f' | OI risk={oi_risk:.2f}' if oi_risk > 0 else ''
+
+                # Check if Dynamic Target Hit
+                # We need to compare UNDERLYING price to the Target Strike
+                # But ExitMonitor usually tracks OPTION price (LTP).
+                # We need the Underlying LTP here.
+                dyn_target = trade.get('dynamic_target', 0.0)
+                
+                if dyn_target > 0:
+                    # Resolve underlying ID again or store it?
+                    # Let's get it from cache or map
+                    # For now, let's assume we can get underlying LTP from bridge if we knew the ID.
+                    # Optimization: Store underlying_sid in trade when we resolve it in _update_dynamic_target
+                    underlying_sid = trade.get('underlying_sid')
+                    if underlying_sid:
+                        u_ltp = self.bridge.get_live_ltp(underlying_sid)
+                        
+                        if u_ltp > 0:
+                             # Bullish (Call) -> Exit if Underlying >= Resistance Strike
+                            if not is_put and u_ltp >= dyn_target:
+                                logger.info(f'🎯 DYNAMIC TARGET HIT: {sym} (Und {u_ltp} >= {dyn_target})')
+                                await self.notifier.squared_off(sym, f'Target Hit (Spot {u_ltp:.2f})')
+                                self.bridge.square_off_single(sid)
+                                break
+                            
+                            # Bearish (Put) -> Exit if Underlying <= Support Strike
+                            if is_put and u_ltp <= dyn_target:
+                                logger.info(f'🎯 DYNAMIC TARGET HIT: {sym} (Und {u_ltp} <= {dyn_target})')
+                                await self.notifier.squared_off(sym, f'Target Hit (Spot {u_ltp:.2f})')
+                                self.bridge.square_off_single(sid)
+                                break
+               
+                if now - last_log_time >= 5.0:
+                    last_log_time = now
+                    # ... existing logging ...
                     logger.info(
-                        f'📊 IMB {sym} ({direction}): raw={raw_imb:.2f} eff={effective_imb:.2f} | '
-                        f'bad_ticks={bad_tick_count}/{bad_ticks_required}{oi_info}'
+                        f'{sym} ({direction}) | Imb={effective_imb:.2f} '
+                        f'| Ticks={bad_tick_count}/{bad_ticks_required}'
+                        f'| DynTgt={dyn_target}'
                     )
 
-                # Use effective_imb for threshold checks
-                if effective_imb >= good_imb:
-                    if bad_tick_count > 0:
-                        logger.info(f'{sym} liquidity recovered ({effective_imb:.2f}), resetting')
+        except Exception as e:
+            logger.error(f'ExitMonitor Loop Error ({sym}): {e}', exc_info=True)
+            self.active_monitors.discard(sym)
+
+    async def _update_dynamic_target(self, sid: str, sym: str, direction: str):
+        """Update the dynamic target based on Max OI Strike (Resistance/Support)."""
+        try:
+            trade = self.tm.get_trade(sid)
+            if not trade: return
+
+            # 1. Identify Underlying Symbol
+            # e.g. "NIFTY 25000 CE" -> "NIFTY"
+            parts = sym.split()
+            root_sym = parts[0]
+            
+            # 2. Resolve Underlying Security ID using Mapper
+            # We need to find the ID for "NIFTY" (Index) or "RELIANCE" (Equity)
+            # The mapper dataframe has this.
+            # Helper in bridge? Or direct access?
+            # Let's use a heuristic: Search mapper for exact match on 'SEM_TRADING_SYMBOL' with Instrument=INDEX or EQ
+            
+            # For efficiency, let's assume specific map or helper
+            # We can use bridge.mapper.get_security_id BUT that returns OPTION ID usually.
+            # Let's add a specialized lookup in this method or use a known one.
+            
+            # FAST FIX: Use the 'scrip_master' from cache if available or scan mapper df?
+            # Creating a tiny helper inside logic:
+            
+            df = self.bridge.mapper.df
+            if df.is_empty(): return
+            
+            import polars as pl
+            
+            # Try INDEX first
+            res = df.filter(
+                (pl.col('SEM_TRADING_SYMBOL') == root_sym) & 
+                (pl.col('SEM_INSTRUMENT_NAME') == 'INDEX')
+            )
+            if res.is_empty():
+                 # Try Stock
+                res = df.filter(
+                    (pl.col('SEM_TRADING_SYMBOL') == root_sym) & 
+                    (pl.col('SEM_EXM_EXCH_ID').is_in(['NSE', 'NSE_EQ', 'EQ'])) &
+                    (pl.col('SEM_INSTRUMENT_NAME') == 'EQUITY')
+                )
+            
+            if res.is_empty():
+                return
+                
+            row = res.row(0, named=True)
+            u_sid = str(row['SEM_SMST_SECURITY_ID'])
+            u_seg = 'IDX_I' if row['SEM_INSTRUMENT_NAME'] == 'INDEX' else 'NSE_EQ'
+            
+            # Update trade with underlying SID for faster lookups later
+            trade['underlying_sid'] = u_sid
+            
+            # 3. Get Expiry
+            # We need the expiry of the OPTION we are trading to find the right chain?
+            # Or just the nearest monthly/weekly?
+            # Let's use the expiry of the trade itself if possible.
+            # 'sym' usually doesn't have expiry date in string for some brokers, but here it might.
+            # "NIFTY 24500 CE" -> No date. 
+            # We need to fetch expiry list for underlying and pick nearest.
+            expiries = self.bridge.fetch_expiry_list(int(u_sid), u_seg)
+            if not expiries: return
+            
+            # Pick nearest active expiry
+            # Logic: just pick the first one that is >= today
+            current_date = datetime.now().strftime('%Y-%m-%d')
+            valid_expiries = [d for d in expiries if d >= current_date]
+            if not valid_expiries: return
+            expiry = sorted(valid_expiries)[0]
+            
+            # 4. Find Max OI Strike
+            # If Bullish (Call Trade) -> We want Resistance (Max Call OI)
+            # If Bearish (Put Trade) -> We want Support (Max Put OI)
+            
+            # Wait:
+            # Bullish Trade (Long CE) -> Stops at Resistance (Call Writers)
+            # Bearish Trade (Long PE) -> Stops at Support (Put Writers)
+            
+            # So:
+            # direction='CALL' (Long CE) -> Look for CE OI Max
+            # direction='PUT' (Long PE) -> Look for PE OI Max
+            
+            target_strike = self.bridge.get_max_oi_strike(int(u_sid), u_seg, expiry, type='CE' if direction == 'CALL' else 'PE')
+            
+            if target_strike > 0:
+                trade['dynamic_target'] = target_strike
+                # logger.info(f"🔄 Updated Dynamic Target for {sym}: {target_strike} (Max {direction} OI)")
+                
+        except Exception as e:
+            logger.error(f"DynTarget Error: {e}")
+                
+                # --- Dynamic OI Target Update (Every 60s) ---
+            if now - last_log_time >= 60:
+                await self._update_dynamic_target(sid, sym, direction)
+                last_log_time = now
+
+            # Check if Dynamic Target Hit
+            dyn_target = trade.get('dynamic_target', 0.0)
+            ltp = self.bridge.get_live_ltp(sid)
+            
+            if dyn_target > 0 and ltp > 0:
+                    # Bullish (Call) -> Exit if above Target
+                if not is_put and ltp >= dyn_target:
+                    logger.info(f'🎯 DYNAMIC TARGET HIT: {sym} ({ltp} >= {dyn_target})')
+                    await self.notifier.squared_off(sym, f'Target Hit ({ltp:.2f})')
+                    self.bridge.square_off_single(sid)
+                    break
+                
+                # Bearish (Put) -> Exit if below Target (wait... option price goes UP when underlying goes down? 
+                # NO. We are buying Options. So for PUT, option price goes UP.
+                # This logic assumes 'dynamic_target' is an *Option Price* target? 
+                # Ah, wait. My plan said "Find Strike with Max OI". That is UNDERLYING price level.
+                # If I am holding a PE, and underlying hits Max Put OI (Support), I should exit.
+                # We need to compare UNDERLYING price to Strike.
+                pass 
+
+            if now - last_log_time >= 5.0:
+                # ... existing log logic ...
+                pass
+
+    async def _update_dynamic_target(self, sid: str, sym: str, direction: str):
+        """Update the dynamic target based on Max OI Strike."""
+        try:
+            # 1. Get underlying details
+            # Symbol is like "NIFTY 25000 CE". We need "NIFTY"
+            parts = sym.split()
+            root_sym = parts[0]
+            
+            # Resolve underlying scrip
+            # This is tricky without access to the full map here, but we can try reverse lookup or passed data.
+            # TradeManager might have it.
+            trade = self.tm.get_trade(sid)
+            if not trade: 
+                return
+                
+            # If we don't have underlying scrip, we can't fetch chain.
+            # But wait, DhanBridge.fetch_option_chain needs Scrip ID.
+            # let's skip strict resolution and rely on hardcoded map for now or ignore?
+            # actually better: Extract from symbol and use map
+            
+            # For now, let's implement the logic assuming we can get the chain
+            # TODO: Need robust way to get underlying scrip from Option Symbol
+            pass
+
+        except Exception as e:
+            logger.error(f'Dynamic Target Update Failed: {e}')
+            if now - last_log_time >= 60:
+                last_log_time = now
+                oi_info = f' | OI risk={oi_risk:.2f}' if oi_risk > 0 else ''
+                logger.info(
+                    f'📊 IMB {sym} ({direction}): raw={raw_imb:.2f} eff={effective_imb:.2f} | '
+                    f'bad_ticks={bad_tick_count}/{bad_ticks_required}{oi_info}'
+                )
+
+            # Use effective_imb for threshold checks
+            if effective_imb >= good_imb:
+                if bad_tick_count > 0:
+                    logger.info(f'{sym} liquidity recovered ({effective_imb:.2f}), resetting')
+                bad_tick_count = 0
+                continue
+
+            if effective_imb < bad_imb:
+                bad_tick_count += 1
+                logger.warning(
+                    f'{sym} ({direction}) bad imbalance eff={effective_imb:.2f} '
+                    f'raw={raw_imb:.2f} ({bad_tick_count}/{bad_ticks_required})'
+                )
+            else:
+                bad_tick_count = max(0, bad_tick_count - 1)
+
+            if bad_tick_count >= bad_ticks_required:
+                oi_note = f' (OI risk: {oi_risk:.1f})' if oi_risk > 0.3 else ''
+                reason = f'{"Buyer" if is_put else "Seller"} dominance ({raw_imb:.2f}){oi_note}'
+
+                if trade.get('is_manual', False):
+                    # Manual Trade: ALERT ONLY
+                    logger.critical(f'🚨 MANUAL TRADE ALERT: {sym} ({direction}) - {reason}')
+                    # Reset counter to avoid spamming every update, or keep warning?
+                    # Let's reset purely to allow "re-alerting" later if it persists
                     bad_tick_count = 0
-                    continue
-
-                if effective_imb < bad_imb:
-                    bad_tick_count += 1
-                    logger.warning(
-                        f'{sym} ({direction}) bad imbalance eff={effective_imb:.2f} '
-                        f'raw={raw_imb:.2f} ({bad_tick_count}/{bad_ticks_required})'
-                    )
                 else:
-                    bad_tick_count = max(0, bad_tick_count - 1)
-
-                if bad_tick_count >= bad_ticks_required:
-                    oi_note = f' (OI risk: {oi_risk:.1f})' if oi_risk > 0.3 else ''
-                    reason = f'{"Buyer" if is_put else "Seller"} dominance ({raw_imb:.2f}){oi_note}'
-
-                    if trade.get('is_manual', False):
-                        # Manual Trade: ALERT ONLY
-                        logger.critical(f'🚨 MANUAL TRADE ALERT: {sym} ({direction}) - {reason}')
-                        # Reset counter to avoid spamming every update, or keep warning?
-                        # Let's reset purely to allow "re-alerting" later if it persists
-                        bad_tick_count = 0
-                    else:
-                        # Auto Trade: EXECUTE EXIT
-                        await self.notifier.squared_off(sym, reason)
-                        logger.critical(f'⚠️ Exit Triggered: {sym} ({direction}) - {reason}')
-                        self.bridge.square_off_single(sid)
-                        break
+                    # Auto Trade: EXECUTE EXIT
+                    await self.notifier.squared_off(sym, reason)
+                    logger.critical(f'⚠️ Exit Triggered: {sym} ({direction}) - {reason}')
+                    self.bridge.square_off_single(sid)
+                    break
 
         finally:
             self.active_monitors.discard(sym)

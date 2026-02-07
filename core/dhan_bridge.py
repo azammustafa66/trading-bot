@@ -832,7 +832,11 @@ class DhanBridge:
                 anchor, atr, parsed_sl, parsed_target, is_positional
             )
 
-            qty = self._calculate_quantity(anchor, final_sl, lot, sid_str)
+            if signal.get('quantity', 0) > 0:
+                qty = int(signal['quantity'])
+                logger.info(f'Using provided quantity: {qty}')
+            else:
+                qty = self._calculate_quantity(anchor, final_sl, lot, sid_str)
             prod_type = 'MARGIN' if is_positional else 'INTRADAY'
 
             # Build and send order

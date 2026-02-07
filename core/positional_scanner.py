@@ -84,31 +84,36 @@ class PositionalScanner:
             self._last_reset_date = today
             logger.info('🔄 Daily state reset')
 
-    def register_trap_signal(self, symbol: str, trap_type: str, day_high: float):
-        """
-        Called by TrapMonitor when a trap is detected.
+    async def execute_order_async(self, func, *args):
+        """Run blocking order execution in thread pool."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, func, *args)
 
+    def register_trap_signal(self, symbol: str, trap_type: str, day_high: float, sentiment_score: float = 0.0):
+        """
+        Register a potential EOD setup from TrapMonitor.
         Args:
-            symbol: Stock/Index symbol (e.g., 'RELIANCE', 'NIFTY')
-            trap_type: 'PUT' or 'CALL' (which writers are trapped)
-            day_high: Current day's high price
+            symbol: Underlying symbol (e.g., 'NIFTY')
+            trap_type: 'PUT' or 'CALL'
+            day_high: Current day high (or spot price at trigger)
+            sentiment_score: Global OI Sentiment (Put Δ - Call Δ)
         """
-        self._reset_daily_state()
-
-        # Skip if not in watchlist
-        if not any(w['SYMBOL'] == symbol for w in self.watchlist):
+        if not self._is_scan_window():
+            logger.info(f'⚠️ Ignoring signal for {symbol} outside scan window')
             return
 
         # Skip if already have max trades
         if len(self.trades_today) >= MAX_TRADES_PER_DAY:
             return
 
-        # Skip if already have signal for this symbol
-        if symbol in self.trap_signals:
-            return
-
-        self.trap_signals[symbol] = {'trap_type': trap_type, 'detected_at': datetime.now(IST), 'day_high': day_high}
-        logger.info(f'Trap Signal Registered: {symbol} | {trap_type} writers trapped | Day High: {day_high}')
+        # Update if exists
+        self.trap_signals[symbol] = {
+            'trap_type': trap_type,
+            'detected_at': datetime.now(IST),
+            'day_high': day_high,
+            'sentiment': sentiment_score
+        }
+        logger.info(f'Trap Signal Registered: {symbol} | {trap_type} (Sent: {sentiment_score}) | Ref: {day_high}')
 
     def _is_scan_window(self) -> bool:
         """Check if current time is within scan window (2 PM - 3:25 PM)."""
@@ -147,16 +152,54 @@ class PositionalScanner:
         if not self.trap_signals:
             return
 
+        # --- Index Divergence Check ---
+        skip_indices = False
+        nifty = self.trap_signals.get('NIFTY')
+        banknifty = self.trap_signals.get('BANKNIFTY')
+
+        if nifty and banknifty:
+            n_sent = nifty.get('sentiment', 0)
+            bn_sent = banknifty.get('sentiment', 0)
+            
+            # Divergence: Signs are opposite (and both non-zero)
+            if (n_sent > 0 and bn_sent < 0) or (n_sent < 0 and bn_sent > 0):
+                logger.warning(f'⚠️ Index Divergence: NIFTY ({n_sent}) vs BANKNIFTY ({bn_sent}). Skipping Indices.')
+                skip_indices = True
+
         logger.info(f'🔍 Checking {len(self.trap_signals)} trap signals for confirmation...')
 
-        for symbol, signal in list(self.trap_signals.items()):
+        # Sort signals by Global Sentiment Magnitude (Descending)
+        sorted_signals = sorted(
+            self.trap_signals.items(),
+            key=lambda item: abs(item[1].get('sentiment', 0)),
+            reverse=True
+        )
+
+        for symbol, signal in sorted_signals:
             if symbol in self.trades_today:
                 continue
 
             if len(self.trades_today) >= MAX_TRADES_PER_DAY:
                 break
+            
+            # Skip if Divergence detected
+            if skip_indices and symbol in ['NIFTY', 'BANKNIFTY']:
+                logger.debug(f'Skipping {symbol} due to Index Divergence')
+                continue
 
             trap_type = signal['trap_type']
+            sentiment = signal.get('sentiment', 0)
+            
+            # --- DIRECTIONAL FILTER (Global Sentiment Validation) ---
+            # Call Trap (Buy CE) -> Requires Bullish Sentiment (Sentiment > 0)
+            if trap_type == 'CALL' and sentiment <= 0:
+                logger.debug(f'Skipping {symbol}: Call Trap but Sentiment Bearish ({sentiment})')
+                continue
+                
+            # Put Trap (Buy PE) -> Requires Bearish Sentiment (Sentiment < 0)
+            if trap_type == 'PUT' and sentiment >= 0:
+                logger.debug(f'Skipping {symbol}: Put Trap but Sentiment Bullish ({sentiment})')
+                continue
             stored_day_high = signal['day_high']
 
             # Get security ID for underlying
@@ -169,19 +212,9 @@ class PositionalScanner:
             if ltp <= 0:
                 continue
 
-            # Get current day high (may have updated since trap detection)
-            current_day_high = self._get_day_high(sec_id)
-            if not current_day_high:
-                current_day_high = stored_day_high
-
-            # CONFIRMATION: Price > Day High
-            if ltp > current_day_high:
-                logger.info(f'✅ CONFIRMED: {symbol} | LTP {ltp} > Day High {current_day_high}')
-
-                # Execute the trade
-                await self._execute_positional_trade(symbol, trap_type)
-            else:
-                logger.debug(f'{symbol}: LTP {ltp} <= Day High {current_day_high}, waiting...')
+            # Execute immediately based on High OI Change confidence
+            logger.info(f'🚀 EXECUTING: {symbol} | Global Sentiment: {signal.get("sentiment", 0)} | LTP: {ltp}')
+            await self._execute_positional_trade(symbol, trap_type)
 
     def _resolve_security_id(self, symbol: str) -> Optional[str]:
         """Resolve security ID for a symbol from watchlist."""
@@ -198,10 +231,10 @@ class PositionalScanner:
             symbol: Underlying symbol
             trap_type: 'PUT' or 'CALL' (which writers are trapped)
         """
-        # Determine option type to buy (opposite of trapped writers)
-        # PUT writers trapped → Price going UP → BUY CALL
-        # CALL writers trapped → Price going DOWN → BUY PUT
-        option_type = 'CE' if trap_type == 'PUT' else 'PE'
+        # Determine option type to buy (SAME as trapped writers because they cover = price moves in that direction)
+        # PUT writers trapped (Support Broken) → Price going DOWN → BUY PUT
+        # CALL writers trapped (Resistance Broken) → Price going UP → BUY CALL
+        option_type = 'PE' if trap_type == 'PUT' else 'CE'
 
         try:
             # 1. Get underlying security ID
@@ -250,6 +283,7 @@ class PositionalScanner:
                 'trading_symbol': trading_symbol,
                 'quantity': lot_size,  # 1 lot
                 'trigger_above': 0,  # Market order
+                'is_positional': True,
             }
 
             result, status = await asyncio.to_thread(self.bridge.execute_super_order, signal)
