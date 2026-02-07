@@ -922,8 +922,7 @@ class DhanBridge:
                 return ltp
         except Exception as e:
             logger.error(f'API fetch failed: {e}')
-        except Exception as e:
-            logger.error(f'API fetch failed: {e}')
+
         return 0.0
 
     def fetch_option_chain(self, underlying_scrip: int, underlying_seg: str, expiry: str) -> Dict[str, Any]:
@@ -959,10 +958,6 @@ class DhanBridge:
             else:
                 logger.error(f'Option Chain Fetch Failed: {resp.get("remarks", "Unknown Error")}')
                 return {}
-
-        except Exception as e:
-            logger.error(f'Option Chain Request Error: {e}')
-            return {}
 
         except Exception as e:
             logger.error(f'Option Chain Request Error: {e}')
