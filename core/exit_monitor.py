@@ -137,8 +137,8 @@ class ExitMonitor:
                 # Adjust bad_ticks_required based on OI risk:
                 # oi_risk = 0.0 → 10 ticks (normal)
                 # oi_risk = 0.5 → 6 ticks (faster exit)
-                # oi_risk = 0.9 → 3 ticks (urgent exit)
-                bad_ticks_required = max(3, int(base_bad_ticks * (1 - oi_risk * 0.7)))
+                # oi_risk = 0.9 → 5 ticks (urgent exit)
+                bad_ticks_required = max(5, int(base_bad_ticks * (1 - oi_risk * 0.7)))
 
                 # DIRECTION-AWARE IMBALANCE:
                 # - CALL: We want buyers (high imb = good). Use raw imbalance.
