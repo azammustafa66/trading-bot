@@ -43,8 +43,8 @@ async def main():
     bridge = DhanBridge()
     batcher = SignalBatcher(bridge, notifier)
 
-    # Initialize Writers Trap Monitor (Live Mode)
-    monitor = TrapMonitor(bridge, dry_run=False)
+    # Initialize Writers Trap Monitor (Live Mode) - with trade_manager for OI risk sync
+    monitor = TrapMonitor(bridge, trade_manager=batcher.tm, dry_run=False)
     monitor.start()
 
     await notifier.started_bot()
@@ -169,8 +169,8 @@ async def main():
     bridge = DhanBridge()
     batcher = SignalBatcher(bridge, notifier)
 
-    # Initialize Writers Trap Monitor (Live Mode)
-    monitor = TrapMonitor(bridge, dry_run=False)
+    # Initialize Writers Trap Monitor (Live Mode) - with trade_manager for OI risk sync
+    monitor = TrapMonitor(bridge, trade_manager=batcher.tm, dry_run=False)
     monitor.start()
 
     await notifier.started_bot()

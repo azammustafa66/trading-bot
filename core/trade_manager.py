@@ -98,6 +98,7 @@ class TradeManager:
             'status': 'OPEN',
             'entry_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'signal_details': signal,
+            'oi_risk': 0.0,  # OI-based risk score (0.0-1.0), updated by TrapMonitor
         }
 
         with self._lock:
@@ -105,6 +106,24 @@ class TradeManager:
             self._save_trades()
 
         logger.info(f'Trade logged: {symbol} (ID: {sec_id})')
+
+    def update_oi_risk(self, sec_id: str, oi_risk: float) -> None:
+        """
+        Update the OI-based risk score for a trade.
+
+        Called by TrapMonitor based on option chain analysis.
+        Values: 0.0 (safe) to 1.0 (danger).
+
+        Args:
+            sec_id: Security ID of the trade.
+            oi_risk: Risk score from OI analysis (0.0-1.0).
+        """
+        sid = str(sec_id)
+        with self._lock:
+            if sid in self.active_trades:
+                self.active_trades[sid]['oi_risk'] = min(1.0, max(0.0, oi_risk))
+                self._save_trades()
+                logger.debug(f'OI Risk updated: {sid} -> {oi_risk:.2f}')
 
     def remove_trade(self, sec_id: str) -> None:
         """

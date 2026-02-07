@@ -56,7 +56,7 @@ class ExitMonitor:
         rules = get_imbalance_rules(sym)
         bad_imb = rules['bad_imb']
         good_imb = rules['good_imb']
-        bad_ticks_required = int(rules['bad_ticks'])
+        base_bad_ticks = int(rules['bad_ticks'])  # Base threshold (10)
 
         bad_tick_count = 0
 
@@ -130,6 +130,16 @@ class ExitMonitor:
 
                 raw_imb = self.bridge.get_combined_imbalance(liquidity_sids)
 
+                # --- Dynamic threshold based on OI Risk ---
+                # OI risk is updated by TrapMonitor every 3 mins
+                oi_risk = trade.get('oi_risk', 0.0)
+
+                # Adjust bad_ticks_required based on OI risk:
+                # oi_risk = 0.0 → 10 ticks (normal)
+                # oi_risk = 0.5 → 6 ticks (faster exit)
+                # oi_risk = 0.9 → 3 ticks (urgent exit)
+                bad_ticks_required = max(3, int(base_bad_ticks * (1 - oi_risk * 0.7)))
+
                 # DIRECTION-AWARE IMBALANCE:
                 # - CALL: We want buyers (high imb = good). Use raw imbalance.
                 # - PUT: We want sellers (low imb = good). Invert: effective_imb = 1/raw_imb
@@ -141,9 +151,10 @@ class ExitMonitor:
                 now = asyncio.get_event_loop().time()
                 if now - last_log_time >= 60:
                     last_log_time = now
+                    oi_info = f' | OI risk={oi_risk:.2f}' if oi_risk > 0 else ''
                     logger.info(
                         f'📊 IMB {sym} ({direction}): raw={raw_imb:.2f} eff={effective_imb:.2f} | '
-                        f'bad_ticks={bad_tick_count}/{bad_ticks_required}'
+                        f'bad_ticks={bad_tick_count}/{bad_ticks_required}{oi_info}'
                     )
 
                 # Use effective_imb for threshold checks
@@ -163,7 +174,8 @@ class ExitMonitor:
                     bad_tick_count = max(0, bad_tick_count - 1)
 
                 if bad_tick_count >= bad_ticks_required:
-                    reason = f'{"Buyer" if is_put else "Seller"} dominance ({raw_imb:.2f})'
+                    oi_note = f' (OI risk: {oi_risk:.1f})' if oi_risk > 0.3 else ''
+                    reason = f'{"Buyer" if is_put else "Seller"} dominance ({raw_imb:.2f}){oi_note}'
 
                     if trade.get('is_manual', False):
                         # Manual Trade: ALERT ONLY

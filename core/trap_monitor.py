@@ -20,8 +20,9 @@ logger = logging.getLogger('TrapMonitor')
 
 
 class TrapMonitor:
-    def __init__(self, bridge: DhanBridge, dry_run: bool = False):
+    def __init__(self, bridge: DhanBridge, trade_manager=None, dry_run: bool = False):
         self.bridge = bridge
+        self.trade_manager = trade_manager  # For updating OI risk scores
         self.strategy = WritersTrapStrategy()
         self.dry_run = dry_run
         self.running = False
@@ -36,7 +37,7 @@ class TrapMonitor:
         # Configuration
         self.WICK_TIME_SEC = 5
         self.IMBALANCE_THRESHOLD = 2.0
-        self.POS_CHECK_INTERVAL = 90  # 1.5 Minutes
+        self.POS_CHECK_INTERVAL = 180  # 3 Minutes for OI delta tracking
 
         # Scrips will be resolved dynamically
         self.MONITORED_SCRIPS = []
@@ -96,33 +97,36 @@ class TrapMonitor:
             )
             if not res.is_empty():
                 row = res.row(0, named=True)
-                # SENSEX usually on BSE, but check exchange if needed. Assuming IDX_I for now or API handling.
                 targets.append({'name': 'SENSEX', 'scrip': int(row['SEM_SMST_SECURITY_ID']), 'seg': 'IDX_I'})
 
-            # 4. TVSMOTOR
-            res = mapper.df.filter(pl.col('SEM_TRADING_SYMBOL').str.contains('TVSMOTOR'))
-            candidate = res.filter(pl.col('SEM_EXM_EXCH_ID').is_in(['NSE_EQ', 'NSE', 'EQ']))
-            if not candidate.is_empty():
-                row = candidate.row(0, named=True)
-                seg = row['SEM_EXM_EXCH_ID']
-                if seg == 'NSE':
-                    seg = 'NSE_EQ'
-                targets.append({'name': 'TVSMOTOR', 'scrip': int(row['SEM_SMST_SECURITY_ID']), 'seg': seg})
+            # 4. FINNIFTY
+            res = mapper.df.filter(pl.col('SEM_TRADING_SYMBOL') == 'FINNIFTY').filter(
+                pl.col('SEM_INSTRUMENT_NAME') == 'INDEX'
+            )
+            if not res.is_empty():
+                row = res.row(0, named=True)
+                targets.append({'name': 'FINNIFTY', 'scrip': int(row['SEM_SMST_SECURITY_ID']), 'seg': 'IDX_I'})
 
-            # 5. IEX
-            res = mapper.df.filter(pl.col('SEM_TRADING_SYMBOL').str.contains('IEX'))
-            candidate = res.filter(pl.col('SEM_EXM_EXCH_ID').is_in(['NSE_EQ', 'NSE', 'EQ']))
-            if not candidate.is_empty():
-                # Prefer exact match if multiple
-                exact = candidate.filter(pl.col('SEM_TRADING_SYMBOL') == 'IEX')
-                if not exact.is_empty():
-                    row = exact.row(0, named=True)
-                else:
+            # 5. MIDCPNIFTY
+            res = mapper.df.filter(pl.col('SEM_TRADING_SYMBOL') == 'MIDCPNIFTY').filter(
+                pl.col('SEM_INSTRUMENT_NAME') == 'INDEX'
+            )
+            if not res.is_empty():
+                row = res.row(0, named=True)
+                targets.append({'name': 'MIDCPNIFTY', 'scrip': int(row['SEM_SMST_SECURITY_ID']), 'seg': 'IDX_I'})
+
+            # --- STOCKS (5 liquid F&O stocks) ---
+            stock_symbols = ['RELIANCE', 'ICICIBANK', 'HDFCBANK', 'INFY', 'SBIN']
+
+            for sym in stock_symbols:
+                res = mapper.df.filter(pl.col('SEM_TRADING_SYMBOL') == sym)
+                candidate = res.filter(pl.col('SEM_EXM_EXCH_ID').is_in(['NSE_EQ', 'NSE', 'EQ']))
+                if not candidate.is_empty():
                     row = candidate.row(0, named=True)
-                seg = row['SEM_EXM_EXCH_ID']
-                if seg == 'NSE':
-                    seg = 'NSE_EQ'
-                targets.append({'name': 'IEX', 'scrip': int(row['SEM_SMST_SECURITY_ID']), 'seg': seg})
+                    seg = row['SEM_EXM_EXCH_ID']
+                    if seg == 'NSE':
+                        seg = 'NSE_EQ'
+                    targets.append({'name': sym, 'scrip': int(row['SEM_SMST_SECURITY_ID']), 'seg': seg})
 
             self.MONITORED_SCRIPS = targets
             logger.info(f'✅ Resolved Targets: {[t["name"] for t in targets]}')
@@ -130,54 +134,112 @@ class TrapMonitor:
         except Exception as e:
             logger.error(f'Instrument Resolution Failed: {e}', exc_info=True)
 
+    def _resolve_single_instrument(self, symbol: str) -> Dict | None:
+        """Dynamically resolve a single instrument by symbol name."""
+        mapper = self.bridge.mapper
+
+        try:
+            # Try as INDEX first
+            res = mapper.df.filter(pl.col('SEM_TRADING_SYMBOL') == symbol).filter(
+                pl.col('SEM_INSTRUMENT_NAME') == 'INDEX'
+            )
+            if not res.is_empty():
+                row = res.row(0, named=True)
+                return {'name': symbol, 'scrip': int(row['SEM_SMST_SECURITY_ID']), 'seg': 'IDX_I'}
+
+            # Try as EQUITY (Stock)
+            res = mapper.df.filter(pl.col('SEM_TRADING_SYMBOL') == symbol)
+            candidate = res.filter(pl.col('SEM_EXM_EXCH_ID').is_in(['NSE_EQ', 'NSE', 'EQ']))
+            if not candidate.is_empty():
+                row = candidate.row(0, named=True)
+                seg = row['SEM_EXM_EXCH_ID']
+                if seg == 'NSE':
+                    seg = 'NSE_EQ'
+                return {'name': symbol, 'scrip': int(row['SEM_SMST_SECURITY_ID']), 'seg': seg}
+
+            return None
+        except Exception as e:
+            logger.error(f'Failed to resolve {symbol}: {e}')
+            return None
+
     def _run_loop(self):
         """Main monitoring loop."""
+        # Rate limit compliance (Dhan Data API: 100k/day)
+        # With 5 targets, scanning every 3 mins = 5 * 20 * 8 = 800 calls/day (safe margin)
+        SCAN_INTERVAL = 180  # 3 minutes
+        last_scan = 0
+
         while not self.stop_event.is_set():
             try:
-                # Scan Targets
-                for target in self.MONITORED_SCRIPS:
-                    self._process_target(target)
-                    time.sleep(3)  # Rate limit
+                now = time.time()
 
-                # Check Positions (Every 1.5 mins)
-                if time.time() - self._last_pos_check > self.POS_CHECK_INTERVAL:
+                # Scan Targets (Every 3 mins, batched: 3 at a time, 5s wait)
+                if now - last_scan > SCAN_INTERVAL:
+                    logger.info('🔍 Scanning Option Chains...')
+                    batch_size = 3
+                    for i in range(0, len(self.MONITORED_SCRIPS), batch_size):
+                        batch = self.MONITORED_SCRIPS[i : i + batch_size]
+                        for target in batch:
+                            self._process_target(target)
+                        if i + batch_size < len(self.MONITORED_SCRIPS):
+                            time.sleep(5)  # Wait 5s between batches
+                    last_scan = now
+
+                # Check Positions (Every 3 mins)
+                if now - self._last_pos_check > self.POS_CHECK_INTERVAL:
                     self._monitor_open_positions()
-                    self._last_pos_check = time.time()
+                    self._last_pos_check = now
+
+                # Sleep between loop iterations
+                time.sleep(10)
 
             except Exception as e:
                 logger.error(f'Monitor Loop Error: {e}', exc_info=True)
-                time.sleep(5)
+                time.sleep(30)
 
     def _monitor_open_positions(self):
-        """Check health of all open positions."""
+        """Check health of all open positions - dynamically resolves instruments."""
         logger.info('🕵️ Checking Position Health...')
         try:
-            # 1. Get Positions
+            # 1. Get ALL Positions from Dhan
             positions = self.bridge.get_positions()
             if not positions:
                 return
 
-            open_positions = [p for p in positions if p.get('positionType') != 'CLOSED' and p.get('quantity', 0) != 0]
+            open_positions = [p for p in positions if p.get('positionType') != 'CLOSED' and p.get('netQty', 0) != 0]
             if not open_positions:
                 logger.info('No open positions to check.')
                 return
 
-            # Group by Underlying (Symbol string matching)
-            # We iterate through our monitored chains effectively
-            for target in self.MONITORED_SCRIPS:
-                t_name = target['name']  # e.g. BANKNIFTY
+            # 2. Extract unique underlyings from positions
+            # Trading symbol format: "NIFTY 25600 CE" or "RELIANCE 1450 PE"
+            underlyings = {}
+            for pos in open_positions:
+                sym = pos.get('tradingSymbol', '')
+                parts = sym.split()
+                if len(parts) >= 3:
+                    underlying = parts[0]  # e.g., "NIFTY", "RELIANCE"
+                    if underlying not in underlyings:
+                        underlyings[underlying] = []
+                    underlyings[underlying].append(pos)
 
-                # Find positions for this symbol
-                relevant_pos = [p for p in open_positions if p.get('tradingSymbol', '').startswith(t_name)]
+            logger.info(f'📊 Monitoring {len(underlyings)} underlyings: {list(underlyings.keys())}')
 
-                if not relevant_pos:
-                    continue
+            # 3. Process each underlying
+            for underlying, pos_list in underlyings.items():
+                # Try to find in predefined list first
+                target = next((t for t in self.MONITORED_SCRIPS if t['name'] == underlying), None)
 
-                logger.info(f'Checking {len(relevant_pos)} positions for {t_name}')
+                # If not in predefined list, resolve dynamically
+                if not target:
+                    target = self._resolve_single_instrument(underlying)
+                    if not target:
+                        logger.warning(f'⚠️ Could not resolve instrument: {underlying}')
+                        continue
 
-                # Fetch Chain (Cached ideally, but here we might re-fetch if not recent)
-                # TODO: Optimization - Share chain data between Trap Scan and Position Check?
-                # For now, explicit fetch to ensure freshness.
+                logger.info(f'Checking {len(pos_list)} positions for {underlying}')
+
+                # Fetch Option Chain
                 expiries = self.bridge.fetch_expiry_list(target['scrip'], target['seg'])
                 if not expiries:
                     continue
@@ -194,17 +256,14 @@ class TrapMonitor:
 
                 oc_data = data['oc']
 
-                for pos in relevant_pos:
-                    # Rename keys to match strategy expectation
-                    # API returns 'tradingSymbol', strategy expects 'trading_symbol'
+                for pos in pos_list:
                     p_adapter = {
                         'trading_symbol': pos.get('tradingSymbol'),
-                        # Positive for Buy?? Check API
                         'quantity': pos.get('netQty', 0),
                         'type': 'BUY' if pos.get('netQty', 0) > 0 else 'SELL',
                     }
 
-                    # We typically only protect BUYS (Long Options) in this strategy
+                    # Only protect LONG positions
                     if p_adapter['quantity'] <= 0:
                         continue
 
@@ -213,8 +272,144 @@ class TrapMonitor:
 
                     if health['status'] == 'DANGER':
                         logger.warning(f'⚠️ POS DANGER: {p_adapter["trading_symbol"]} | {health["reason"]}')
-                        # TODO: Auto-Exit Logic?
-                        # For now, just Log as requested "Review"
+
+                    # --- AGGREGATED OI ANALYSIS (±5 Strikes) ---
+                    # Institutional Logic:
+                    # - Long CALL safe when: Call OI ↓ (resistance weakening) + Put OI ↑ (support building)
+                    # - Long PUT safe when: Put OI ↓ (support weakening) + Call OI ↑ (resistance building)
+
+                    sym = p_adapter['trading_symbol']
+                    sec_id = pos.get('securityId')
+                    parts = sym.split()
+
+                    if len(parts) >= 3:
+                        p_strike = float(parts[-2])
+                        p_type = parts[-1]  # CE or PE
+
+                        # Get all strikes and sort them
+                        all_strikes = sorted([float(s) for s in oc_data.keys() if s.replace('.', '').isdigit()])
+
+                        # Find index of our strike
+                        try:
+                            strike_idx = min(range(len(all_strikes)), key=lambda i: abs(all_strikes[i] - p_strike))
+                        except ValueError:
+                            continue
+
+                        # Get ±5 strikes around our position
+                        start_idx = max(0, strike_idx - 5)
+                        end_idx = min(len(all_strikes), strike_idx + 6)
+                        nearby_strikes = all_strikes[start_idx:end_idx]
+
+                        # Aggregate OI changes
+                        total_call_delta = 0
+                        total_put_delta = 0
+                        total_call_oi = 0
+                        total_put_oi = 0
+
+                        for strike in nearby_strikes:
+                            strike_key = str(strike) if str(strike) in oc_data else str(int(strike))
+                            s_data = oc_data.get(strike_key, {})
+
+                            ce_data = s_data.get('ce', {})
+                            pe_data = s_data.get('pe', {})
+
+                            ce_oi = ce_data.get('oi', 0)
+                            ce_prev = ce_data.get('previous_oi', 0)
+                            pe_oi = pe_data.get('oi', 0)
+                            pe_prev = pe_data.get('previous_oi', 0)
+
+                            total_call_oi += ce_oi
+                            total_put_oi += pe_oi
+                            total_call_delta += (ce_oi - ce_prev) if ce_prev > 0 else 0
+                            total_put_delta += (pe_oi - pe_prev) if pe_prev > 0 else 0
+
+                        # Get current strike's price data
+                        strike_key = str(p_strike) if str(p_strike) in oc_data else str(int(p_strike))
+                        my_strike_data = oc_data.get(strike_key, {})
+                        opt_data = my_strike_data.get('ce' if p_type == 'CE' else 'pe', {})
+                        ltp = opt_data.get('last_price', 0)
+                        prev_close = opt_data.get('previous_close_price', 0)
+                        price_falling = ltp < prev_close if prev_close > 0 else False
+
+                        logger.info(
+                            f'📊 OI Summary [{sym}] ±5 Strikes: '
+                            f'Call Δ={total_call_delta:+,} | Put Δ={total_put_delta:+,} | '
+                            f'Total CE={total_call_oi:,} | Total PE={total_put_oi:,}'
+                        )
+
+                        # --- EXIT DECISION LOGIC (Institutional Perspective) ---
+                        # Thresholds (Indian market - aggregated across 10 strikes)
+                        OI_BUILDUP_THRESHOLD = 300000  # 3 lakh (aggregated)
+                        OI_SUPPORT_THRESHOLD = 100000  # 1 lakh support building
+
+                        should_exit = False
+                        should_hold = False
+                        exit_reason = ''
+                        hold_reason = ''
+
+                        if p_type == 'CE':  # LONG CALL
+                            # EXIT: Call OI increasing (resistance) + Put OI NOT increasing (no support)
+                            if total_call_delta > OI_BUILDUP_THRESHOLD and total_put_delta < OI_SUPPORT_THRESHOLD:
+                                should_exit = True
+                                exit_reason = (
+                                    f'Resistance Building: Call Δ +{total_call_delta:,}, Put Δ {total_put_delta:+,}'
+                                )
+
+                            # EXIT: Call OI surge + Price falling
+                            elif total_call_delta > OI_BUILDUP_THRESHOLD and price_falling:
+                                should_exit = True
+                                exit_reason = f'Short Buildup: Call Δ +{total_call_delta:,} & Price ↓'
+
+                            # HOLD: Call OI decreasing (resistance weakening) + Put OI increasing (support)
+                            elif total_call_delta < -100000 and total_put_delta > OI_SUPPORT_THRESHOLD:
+                                should_hold = True
+                                hold_reason = f'Bullish: Call Δ {total_call_delta:,}, Put Δ +{total_put_delta:,}'
+
+                        elif p_type == 'PE':  # LONG PUT
+                            # EXIT: Put OI increasing (support building = bad for long put)
+                            if total_put_delta > OI_BUILDUP_THRESHOLD and total_call_delta < OI_SUPPORT_THRESHOLD:
+                                should_exit = True
+                                exit_reason = (
+                                    f'Support Building: Put Δ +{total_put_delta:,}, Call Δ {total_call_delta:+,}'
+                                )
+
+                            # EXIT: Put OI surge + Price falling (put premium eroding)
+                            elif total_put_delta > OI_BUILDUP_THRESHOLD and price_falling:
+                                should_exit = True
+                                exit_reason = f'Put Writers Winning: Put Δ +{total_put_delta:,} & Price ↓'
+
+                            # HOLD: Put OI decreasing + Call OI increasing (bearish = good for long put)
+                            elif total_put_delta < -100000 and total_call_delta > OI_SUPPORT_THRESHOLD:
+                                should_hold = True
+                                hold_reason = f'Bearish: Put Δ {total_put_delta:,}, Call Δ +{total_call_delta:,}'
+
+                        # --- Calculate OI Risk Score (0.0 to 1.0) ---
+                        oi_risk = 0.0
+
+                        if should_exit:
+                            # High risk - signal to ExitMonitor to lower bad_ticks threshold
+                            oi_risk = 0.9
+                            logger.warning(f'⚠️ OI RISK HIGH: {sym} | {exit_reason}')
+                        elif should_hold:
+                            # OI is favorable, no rush to exit
+                            oi_risk = 0.0
+                            logger.info(f'✅ OI FAVORABLE: {sym} | {hold_reason}')
+                        else:
+                            # Neutral - calculate proportional risk based on delta magnitude
+                            if p_type == 'CE':
+                                risk_delta = total_call_delta
+                            else:
+                                risk_delta = total_put_delta
+
+                            if risk_delta > 0:
+                                # Gradual risk: 0.1 at 50k, 0.5 at 150k, 0.7 at 250k
+                                oi_risk = min(0.7, risk_delta / 350000)
+
+                        # Update TradeManager with OI risk score
+                        if sec_id and self.trade_manager:
+                            self.trade_manager.update_oi_risk(sec_id, oi_risk)
+                            if oi_risk > 0.5:
+                                logger.info(f'📊 OI Risk [{sym}]: {oi_risk:.2f} → ExitMonitor will use faster exit')
 
         except Exception as e:
             logger.error(f'Pos Monitor Error: {e}', exc_info=True)
