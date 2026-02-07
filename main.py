@@ -43,11 +43,19 @@ async def main():
     bridge = DhanBridge()
     batcher = SignalBatcher(bridge, notifier)
 
-    # Initialize Writers Trap Monitor (Live Mode) - with trade_manager for OI risk sync
-    monitor = TrapMonitor(bridge, trade_manager=batcher.tm, dry_run=False)
+    # Initialize Positional Scanner for EOD trades (2 PM - 3:25 PM)
+    from core.positional_scanner import PositionalScanner
+
+    positional_scanner = PositionalScanner(bridge, trade_manager=batcher.tm, dry_run=False)
+
+    # Initialize Writers Trap Monitor - with trade_manager for OI risk sync and positional scanner
+    monitor = TrapMonitor(bridge, trade_manager=batcher.tm, positional_scanner=positional_scanner, dry_run=False)
     monitor.start()
 
     await notifier.started_bot()
+
+    # Start EOD positional scan loop (checks every minute between 2-3:25 PM)
+    asyncio.create_task(eod_positional_scanner_loop(positional_scanner))
 
     asyncio.create_task(reconciliation_loop(bridge, batcher, 300))  # Every 5 minutes
 
@@ -135,6 +143,34 @@ signal.signal(signal.SIGTERM, handle_shutdown_signal)
 signal.signal(signal.SIGINT, handle_shutdown_signal)
 
 
+# --- EOD POSITIONAL SCANNER LOOP --- #
+async def eod_positional_scanner_loop(scanner):
+    """Runs between 2 PM - 3:25 PM, checking trap signals every 60 seconds."""
+    from datetime import datetime, time
+    from zoneinfo import ZoneInfo
+
+    IST = ZoneInfo('Asia/Kolkata')
+    SCAN_START = time(14, 0)
+    SCAN_END = time(15, 25)
+
+    logger.info('📊 EOD Positional Scanner loop started')
+
+    while True:
+        try:
+            now = datetime.now(IST).time()
+
+            if SCAN_START <= now <= SCAN_END:
+                await scanner.check_and_execute()
+                await asyncio.sleep(60)  # Check every 60 seconds during window
+            else:
+                # Outside scan window, sleep longer
+                await asyncio.sleep(300)  # Check every 5 mins if outside window
+
+        except Exception as e:
+            logger.error(f'EOD Scanner loop error: {e}', exc_info=True)
+            await asyncio.sleep(60)
+
+
 # --- RECONCILIATION --- #
 async def reconciliation_loop(bridge: DhanBridge, batcher: SignalBatcher, interval: int = 1000):
     """Periodically reconciles local trades with broker positions."""
@@ -153,56 +189,6 @@ async def reconciliation_loop(bridge: DhanBridge, batcher: SignalBatcher, interv
             logger.error(f'Reconciliation loop error: {e}', exc_info=True)
 
         await asyncio.sleep(interval)
-
-
-# --- MAIN --- #
-async def main():
-    if not TELEGRAM_API_ID or not TELEGRAM_API_HASH:
-        logger.critical('Telegram credentials missing')
-        return
-
-    client = TelegramClient(SESSION_NAME, int(TELEGRAM_API_ID), TELEGRAM_API_HASH)
-    await client.start()  # pyright: ignore[reportGeneralTypeIssues]
-    logger.info('Telegram connected')
-
-    notifier = Notifier(client, ADMIN_ID)
-    bridge = DhanBridge()
-    batcher = SignalBatcher(bridge, notifier)
-
-    # Initialize Writers Trap Monitor (Live Mode) - with trade_manager for OI risk sync
-    monitor = TrapMonitor(bridge, trade_manager=batcher.tm, dry_run=False)
-    monitor.start()
-
-    await notifier.started_bot()
-
-    asyncio.create_task(reconciliation_loop(bridge, batcher, 300))  # Every 5 minutes
-
-    resolved = []
-    for ch in TARGET_CHANNELS:
-        try:
-            # If channel is a string but looks like an ID, convert it
-            if isinstance(ch, str) and ch.lstrip('-').isdigit():
-                ch = int(ch)
-
-            resolved.append(await client.get_entity(ch))
-        except (ValueError, TypeError) as e:
-            logger.error(f'Invalid channel ID {ch}: {e}')
-        except Exception as e:
-            # Catch-all for Telethon resolution errors
-            logger.error(f'Failed to resolve channel {ch}: {e}')
-
-    @client.on(events.NewMessage(chats=resolved))
-    async def handler(event):
-        if event.message and event.message.message:
-            await batcher.add_message(event.message.message, event.message.date, event.chat_id)
-
-    try:
-        # pyright: ignore[reportGeneralTypeIssues]
-        await client.run_until_disconnected()
-    finally:
-        logger.info('Main loop finished. Stopping monitor...')
-        if 'monitor' in locals():
-            monitor.stop()
 
 
 if __name__ == '__main__':

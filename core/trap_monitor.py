@@ -20,9 +20,10 @@ logger = logging.getLogger('TrapMonitor')
 
 
 class TrapMonitor:
-    def __init__(self, bridge: DhanBridge, trade_manager=None, dry_run: bool = False):
+    def __init__(self, bridge: DhanBridge, trade_manager=None, positional_scanner=None, dry_run: bool = False):
         self.bridge = bridge
-        self.trade_manager = trade_manager  # For updating OI risk scores
+        self.trade_manager = trade_manager
+        self.positional_scanner = positional_scanner
         self.strategy = WritersTrapStrategy()
         self.dry_run = dry_run
         self.running = False
@@ -185,13 +186,11 @@ class TrapMonitor:
                             time.sleep(5)  # Wait 5s between batches
                     last_scan = now
 
-                # Check Positions (Every 3 mins)
                 if now - self._last_pos_check > self.POS_CHECK_INTERVAL:
                     self._monitor_open_positions()
                     self._last_pos_check = now
 
-                # Sleep between loop iterations
-                time.sleep(10)
+                time.sleep(5.0)
 
             except Exception as e:
                 logger.error(f'Monitor Loop Error: {e}', exc_info=True)
@@ -507,6 +506,19 @@ class TrapMonitor:
         logger.info(
             f'🚀 TRAP TRIGGERED: {trap["symbol"]} | Reason: {reason} | Spot: {trap["spot"]} | Strike: {trap["strike"]}'
         )  # noqa: E501
+
+        # --- Register with Positional Scanner for EOD Entry ---
+        # Extract underlying from symbol (e.g., "NIFTY 25600 CE" -> "NIFTY")
+        if self.positional_scanner:
+            try:
+                symbol_parts = trap['symbol'].split()
+                underlying = symbol_parts[0] if symbol_parts else ''
+                trap_type = 'PUT' if trap.get('type') == 'PUT_TRAP' else 'CALL'
+                day_high = trap.get('spot', 0)  # Use spot as reference
+
+                self.positional_scanner.register_trap_signal(underlying, trap_type, day_high)
+            except Exception as e:
+                logger.error(f'Failed to register trap with PositionalScanner: {e}')
 
         # Signal Construction
         signal = {
